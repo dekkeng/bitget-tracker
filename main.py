@@ -118,6 +118,22 @@ def _parse_trades(raw: Any) -> list[dict]:
     return out
 
 
+def _parse_balance(raw: Any) -> float:
+    """Extract total balance from /v1/trace/mt5/account/balance response."""
+    if not isinstance(raw, dict):
+        return 0.0
+    data = raw.get("data") or raw
+    if isinstance(data, dict):
+        for key in ("balance", "totalBalance", "total_balance", "equity", "totalEquity"):
+            val = data.get(key)
+            if val is not None:
+                try:
+                    return round(float(val), 2)
+                except (TypeError, ValueError):
+                    pass
+    return 0.0
+
+
 def _parse_history_chart(trades: list[dict]) -> list[dict]:
     """Group closed trades by Bangkok date for the 30-day chart."""
     from collections import defaultdict
@@ -148,11 +164,14 @@ def _rebuild_summary() -> None:
     )
     all_time_pnl = sum(t["pnl"] for t in trades)
 
+    balance = _parse_balance(_mt5["balance_raw"])
+
     _mt5["summary"] = {
         "daily_pnl": round(daily_pnl, 4),
         "open_positions": len(positions),
         "open_positions_pnl": round(open_pnl, 4),
         "all_time_pnl": round(all_time_pnl, 4),
+        "total_balance": balance,
         "pushed_at": _mt5["pushed_at"],
     }
     _mt5["trades"]  = trades
@@ -179,11 +198,6 @@ async def push_mt5(request: Request):
         _mt5["history_raw"] = data
     elif kind == "balance":
         _mt5["balance_raw"] = data
-    elif kind == "balance_candidate":
-        url = data.get("url", "")
-        payload = data.get("data", {})
-        logger.info("BALANCE CANDIDATE url=%s payload=%s", url, str(payload)[:400])
-        _mt5["balance_raw"] = data  # store for inspection
 
     if _mt5["positions_raw"] is not None:
         _rebuild_summary()
@@ -250,6 +264,7 @@ async def get_widget():
         "open_positions": s["open_positions"],
         "open_positions_pnl": s["open_positions_pnl"],
         "all_time_pnl": s["all_time_pnl"],
+        "total_balance": s.get("total_balance", 0.0),
         "updated_at": datetime.now(BKK).strftime("%H:%M"),
         "stale": False,
     }

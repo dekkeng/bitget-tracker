@@ -41,19 +41,20 @@
     const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
     const promise = _origFetch.apply(this, args);
 
-    if (url.includes('/v1/trace/mt5/')) {
+    if (url.includes('/v1/trace/mt5/data/tracePosition')) {
       promise.then(r => r.clone().json()).then(data => {
-        // Log ALL mt5 endpoints so we can find the balance one
-        console.log('[Bitget Tracker] mt5 call:', url, JSON.stringify(data).slice(0, 300));
-
-        if (url.includes('/v1/trace/mt5/data/tracePosition')) {
-          pushToTracker('positions', data);
-        } else if (url.includes('/v1/trace/mt5/trace/positionHistory')) {
-          pushToTracker('history', data);
-        } else {
-          // Forward ALL other mt5 responses — one of them has the balance
-          pushToTracker('balance_candidate', { url, data });
-        }
+        console.log('[Bitget Tracker] captured positions');
+        pushToTracker('positions', data);
+      }).catch(() => {});
+    } else if (url.includes('/v1/trace/mt5/trace/positionHistory')) {
+      promise.then(r => r.clone().json()).then(data => {
+        console.log('[Bitget Tracker] captured history');
+        pushToTracker('history', data);
+      }).catch(() => {});
+    } else if (url.includes('/v1/trace/mt5/account/balance')) {
+      promise.then(r => r.clone().json()).then(data => {
+        console.log('[Bitget Tracker] captured balance');
+        pushToTracker('balance', data);
       }).catch(() => {});
     }
 
@@ -121,29 +122,15 @@
       if (r.ok) { pushToTracker('history', await r.json()); console.log('[Bitget Tracker] history ok'); }
     } catch (e) { console.warn('[Bitget Tracker] history error:', e); }
 
-    // Balance — try several candidate endpoints
-    const balancePaths = [
-      { method: 'GET',  url: `/v1/trace/mt5/data/traceAccount` },
-      { method: 'POST', url: `/v1/trace/mt5/data/traceAccount`, body: { portfolioId } },
-      { method: 'GET',  url: `/v1/trace/mt5/account/balance` },
-      { method: 'POST', url: `/v1/trace/mt5/trace/portfolioDetail`, body: { portfolioId } },
-      { method: 'GET',  url: `/v1/trace/mt5/data/portfolioDetail?portfolioId=${portfolioId}` },
-    ];
-    for (const { method, url, body } of balancePaths) {
-      try {
-        const opts = { method, credentials: 'include', headers: { 'Content-Type': 'application/json' } };
-        if (body) opts.body = JSON.stringify(body);
-        const r = await fetch(url, opts);
-        if (r.ok) {
-          const data = await r.json();
-          if (data.code === '200' || data.status !== 404) {
-            pushToTracker('balance', data);
-            console.log('[Bitget Tracker] balance ok from', url, data);
-            break;
-          }
-        }
-      } catch (_) {}
-    }
+    // Balance
+    try {
+      const r = await fetch('/v1/trace/mt5/account/balance', {
+        method: 'GET',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (r.ok) { pushToTracker('balance', await r.json()); console.log('[Bitget Tracker] balance ok'); }
+    } catch (e) { console.warn('[Bitget Tracker] balance error:', e); }
   }
 
   // Start polling after page load
