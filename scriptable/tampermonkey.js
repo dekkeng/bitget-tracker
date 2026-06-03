@@ -279,5 +279,11 @@
     autoTabCycle();
   });
 
+  // ── Auto-refresh page every 1 hour to keep session alive ────────────────
+  setInterval(() => {
+    console.log('[Bitget Tracker] auto-refreshing page');
+    location.reload();
+  }, 60 * 60 * 1000);
+
   console.log('[Bitget Tracker] v2.0 loaded — pushing to', TRACKER_URL);
 })();
