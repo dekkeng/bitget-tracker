@@ -181,6 +181,9 @@ async def _poll_once(push_fn: Callable, cookie_str: str):
             except Exception as e:
                 logger.warning("Navigation timeout (may still work): %s", e)
 
+            # Wait for React to render
+            await asyncio.sleep(8)
+
             # Check login
             text = await page.evaluate("document.body?.innerText?.slice(0, 500) || ''")
             if "Log In" in text and "Sign Up" in text:
