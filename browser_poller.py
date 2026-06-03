@@ -14,10 +14,40 @@ BITGET_PAGE = os.environ.get(
     "BITGET_PAGE",
     f"https://www.bitget.com/copy-trading/mt5/follower/detail?portfolioId={PORTFOLIO_ID}",
 )
-POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SEC", "60"))
-SCRAPE_INTERVAL = int(os.environ.get("SCRAPE_INTERVAL_SEC", "30"))
-REFRESH_INTERVAL = int(os.environ.get("REFRESH_INTERVAL_SEC", "3600"))
+POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SEC", "120"))
 COOKIES_FILE = Path(os.environ.get("COOKIES_PATH", "cookies.json"))
+
+CHROMIUM_ARGS = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--single-process",
+    "--no-zygote",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-default-apps",
+    "--disable-sync",
+    "--disable-translate",
+    "--no-first-run",
+    "--mute-audio",
+    "--disable-hang-monitor",
+    "--disable-client-side-phishing-detection",
+    "--disable-component-update",
+    "--disable-domain-reliability",
+    "--disable-renderer-backgrounding",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-ipc-flooding-protection",
+    "--disable-features=TranslateUI,site-per-process",
+    "--renderer-process-limit=1",
+    "--js-flags=--max-old-space-size=128",
+    "--disable-canvas-aa",
+    "--disable-2d-canvas-clip-aa",
+    "--disable-software-rasterizer",
+    "--disable-accelerated-2d-canvas",
+]
+
+BLOCKED_TYPES = {"image", "media", "font", "stylesheet"}
 
 
 def _load_cookie_string() -> str:
@@ -76,16 +106,6 @@ async def start_poller(push_fn: Callable):
     _status["running"] = True
     await asyncio.sleep(3)
 
-    cookie_str = _load_cookie_string()
-    if not cookie_str:
-        logger.info("Browser poller: no cookie set, waiting...")
-        _status["last_error"] = "No cookie set"
-        while not _load_cookie_string():
-            await asyncio.sleep(10)
-        cookie_str = _load_cookie_string()
-
-    logger.info("Browser poller: starting with %d-char cookie", len(cookie_str))
-
     try:
         from playwright.async_api import async_playwright
     except ImportError:
@@ -94,159 +114,97 @@ async def start_poller(push_fn: Callable):
         return
 
     while True:
-        _status["last_error"] = None
-        try:
-            await _run_browser_session(push_fn, cookie_str)
-        except Exception as e:
-            logger.error("Browser session crashed: %s", e)
-            _status["last_error"] = f"Browser crashed: {e}"
-            _status["browser_alive"] = False
-
         cookie_str = _load_cookie_string()
         if not cookie_str:
-            logger.info("Browser poller: cookie cleared, waiting...")
             _status["last_error"] = "No cookie set"
-            while not _load_cookie_string():
-                await asyncio.sleep(10)
-            cookie_str = _load_cookie_string()
+            _status["browser_alive"] = False
+            await asyncio.sleep(10)
+            continue
 
-        logger.info("Browser poller: restarting in 15s...")
-        await asyncio.sleep(15)
+        _status["last_error"] = None
+        try:
+            await _poll_once(push_fn, cookie_str)
+        except Exception as e:
+            logger.error("Poll cycle crashed: %s", e)
+            _status["last_error"] = f"Browser crashed: {e}"
+
+        _status["browser_alive"] = False
+        logger.info("Next poll in %ds...", POLL_INTERVAL)
+        await asyncio.sleep(POLL_INTERVAL)
 
 
-async def _run_browser_session(push_fn: Callable, cookie_str: str):
+async def _poll_once(push_fn: Callable, cookie_str: str):
+    """Launch browser, grab all data, close browser. ~30s per cycle."""
     from playwright.async_api import async_playwright
 
+    intercepted = {}
+
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--single-process",
-                "--no-zygote",
-                "--disable-extensions",
-                "--disable-background-networking",
-                "--disable-default-apps",
-                "--disable-sync",
-                "--disable-translate",
-                "--no-first-run",
-                "--mute-audio",
-                "--disable-hang-monitor",
-                "--disable-client-side-phishing-detection",
-                "--disable-component-update",
-                "--disable-domain-reliability",
-                "--disable-renderer-backgrounding",
-                "--disable-backgrounding-occluded-windows",
-                "--disable-ipc-flooding-protection",
-                "--disable-features=TranslateUI,site-per-process,NetworkService",
-                "--renderer-process-limit=1",
-                "--js-flags=--max-old-space-size=128",
-                "--disable-canvas-aa",
-                "--disable-2d-canvas-clip-aa",
-                "--disable-software-rasterizer",
-                "--disable-accelerated-2d-canvas",
-            ],
-        )
+        browser = await p.chromium.launch(headless=True, args=CHROMIUM_ARGS)
+        try:
+            context = await browser.new_context(
+                viewport={"width": 800, "height": 600},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            )
 
-        context = await browser.new_context(
-            viewport={"width": 800, "height": 600},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        )
+            cookies = _parse_cookie_string(cookie_str)
+            if cookies:
+                await context.add_cookies(cookies)
 
-        cookies = _parse_cookie_string(cookie_str)
-        if cookies:
-            await context.add_cookies(cookies)
-            logger.info("Injected %d cookies", len(cookies))
+            page = await context.new_page()
 
-        page = await context.new_page()
+            # Block heavy resources
+            async def _block(route):
+                if route.request.resource_type in BLOCKED_TYPES:
+                    await route.abort()
+                else:
+                    await route.continue_()
+            await page.route("**/*", _block)
 
-        # Block heavy resources to save memory
-        BLOCKED_TYPES = {"image", "media", "font"}
-        async def _block_resources(route):
-            if route.request.resource_type in BLOCKED_TYPES:
-                await route.abort()
-            else:
-                await route.continue_()
-        await page.route("**/*", _block_resources)
+            # Intercept API responses during navigation
+            async def on_response(response):
+                url = response.url
+                if "/v1/" not in url:
+                    return
+                try:
+                    data = await response.json()
+                    _classify_and_push(url, data, push_fn)
+                except Exception:
+                    pass
 
-        # Intercept API responses
-        async def on_response(response):
-            url = response.url
-            if "/v1/" not in url:
-                return
+            page.on("response", on_response)
+
+            # Navigate
+            logger.info("Poll: launching browser...")
             try:
-                data = await response.json()
-                _classify_and_push(url, data, push_fn)
-            except Exception:
-                pass
+                await page.goto(BITGET_PAGE, wait_until="networkidle", timeout=45_000)
+            except Exception as e:
+                logger.warning("Navigation timeout (may still work): %s", e)
 
-        page.on("response", on_response)
+            # Check login
+            text = await page.evaluate("document.body?.innerText?.slice(0, 500) || ''")
+            if "Log In" in text and "Sign Up" in text:
+                logger.error("Cookie expired — not logged in")
+                _status["last_error"] = "Cookie expired — paste a fresh cookie"
+                return
 
-        logger.info("Navigating to %s", BITGET_PAGE)
-        try:
-            await page.goto(BITGET_PAGE, wait_until="networkidle", timeout=60_000)
-        except Exception as e:
-            logger.warning("Navigation timeout (may still work): %s", e)
+            _status["browser_alive"] = True
+            _status["last_error"] = None
 
-        title = await page.title()
-        logger.info("Page title: %s", title)
+            # Active API polls (fetch from within browser context)
+            await _active_poll(page, push_fn)
 
-        # Check if logged in
-        text = await page.evaluate("document.body?.innerText?.slice(0, 500) || ''")
-        if "Log In" in text and "Sign Up" in text:
-            logger.error("Not logged in — cookie may be expired")
-            _status["last_error"] = "Cookie expired — not logged in. Paste a fresh cookie."
-            _status["browser_alive"] = False
-            await browser.close()
-            while _load_cookie_string() == cookie_str:
-                await asyncio.sleep(10)
-            return
+            # Scrape DOM for balance/equity
+            await _scrape_copy_details(page, push_fn)
 
-        _status["browser_alive"] = True
-        _status["last_error"] = None
-        logger.info("Browser poller: logged in and running")
+            # Click Balance history tab, wait, scrape again
+            await _click_tab(page, "Balance history")
+            await asyncio.sleep(3)
+            await _scrape_copy_details(page, push_fn)
 
-        # Auto tab cycle: Balance history → scrape → Positions
-        await _auto_tab_cycle(page, push_fn)
-
-        # Initial poll
-        await _active_poll(page, push_fn)
-
-        # Main loop
-        poll_counter = 0
-        try:
-            while True:
-                await asyncio.sleep(POLL_INTERVAL)
-                poll_counter += 1
-
-                # Poll API
-                await _active_poll(page, push_fn)
-
-                # Scrape DOM every other cycle
-                if poll_counter % 2 == 0:
-                    await _scrape_copy_details(page, push_fn)
-
-                # Full page refresh every hour
-                if poll_counter * POLL_INTERVAL >= REFRESH_INTERVAL:
-                    poll_counter = 0
-                    logger.info("Auto-refreshing page...")
-                    try:
-                        await page.goto(BITGET_PAGE, wait_until="networkidle", timeout=60_000)
-                        await _auto_tab_cycle(page, push_fn)
-                    except Exception as e:
-                        logger.warning("Refresh error: %s", e)
-
-                # Check if cookie was updated
-                current_cookie = _load_cookie_string()
-                if current_cookie != cookie_str:
-                    logger.info("Cookie changed — restarting browser session")
-                    break
+            logger.info("Poll cycle complete — closing browser")
 
         finally:
-            _status["browser_alive"] = False
             await browser.close()
 
 
@@ -269,18 +227,17 @@ def _classify_and_push(url: str, data: dict, push_fn: Callable):
             logger.info("Browser: captured copy_details")
             push_fn("copy_details", d)
         return
-    # Broad sniff for balance fields
     if isinstance(data, dict):
         d = data.get("data", data)
         if isinstance(d, dict) and not isinstance(d, list):
-            bal_key = next((k for k in d if any(p in k.lower() for p in ("balance", "equity"))), None)
+            bal_key = next((k for k in d if any(pat in k.lower() for pat in ("balance", "equity"))), None)
             if bal_key:
                 push_fn("copy_details", d)
                 return
 
 
 async def _active_poll(page, push_fn: Callable):
-    logger.info("Browser: polling...")
+    logger.info("Browser: polling APIs...")
     try:
         pos = await page.evaluate("""async (pid) => {
             const r = await fetch('/v1/trace/mt5/data/tracePosition', {
@@ -341,7 +298,6 @@ async def _scrape_copy_details(page, push_fn: Callable):
     try:
         page_text = await page.evaluate("() => (document.body?.innerText || '').slice(0, 1000)")
         _status["last_page_text"] = page_text
-        logger.info("Browser: page text preview: %s", page_text[:300])
     except Exception as e:
         logger.warning("Page text capture error: %s", e)
 
@@ -378,35 +334,8 @@ async def _scrape_copy_details(page, push_fn: Callable):
     except Exception as e:
         logger.warning("Scrape copy_details error: %s", e)
 
-    try:
-        rows = await page.evaluate("""() => {
-            const text = document.body?.innerText || '';
-            const rows = [];
-            for (const m of text.matchAll(/\\bAdd\\b[\\s\\S]{0,30}?([\\d,]+\\.?\\d+)\\s*USDT/gi)) {
-                rows.push({ type: 'Add', amount: parseFloat(m[1].replace(/,/g, '')) });
-            }
-            for (const m of text.matchAll(/Transfer\\s*out[\\s\\S]{0,30}?([\\d,]+\\.?\\d+)\\s*USDT/gi)) {
-                rows.push({ type: 'Transfer out', amount: parseFloat(m[1].replace(/,/g, '')) });
-            }
-            return rows;
-        }""")
-        if rows:
-            logger.info("Browser: DOM scraped %d balance_history rows", len(rows))
-            push_fn("balance_history", rows)
-    except Exception as e:
-        logger.warning("Scrape balance_history error: %s", e)
-
     _status["last_scrape"] = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
     _status["scrapes"] += 1
-
-
-async def _auto_tab_cycle(page, push_fn: Callable):
-    await asyncio.sleep(10)
-    await _click_tab(page, "Balance history")
-    await asyncio.sleep(5)
-    await _scrape_copy_details(page, push_fn)
-    await asyncio.sleep(5)
-    await _click_tab(page, "Positions")
 
 
 async def _click_tab(page, tab_name: str):
