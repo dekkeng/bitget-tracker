@@ -236,16 +236,21 @@ async def push_mt5(request: Request):
         _mt5["history_raw"] = data
     elif kind == "copy_details":
         if isinstance(data, dict):
-            for key in ("totalBalance", "total_balance", "totalEquity", "balance"):
-                val = data.get(key)
-                if val is not None:
+            found = False
+            for key in list(data.keys()):
+                if any(pat in key.lower() for pat in ("balance", "equity", "totalbal", "totalequity")):
                     try:
-                        _settings["balance"] = round(float(val), 2)
-                        _save_settings(_settings)
-                        logger.info("Auto-updated balance=%.2f from copy_details", _settings["balance"])
-                        break
+                        val = round(float(data[key]), 2)
+                        if val > 0:
+                            _settings["balance"] = val
+                            _save_settings(_settings)
+                            logger.info("Auto-updated balance=%.2f from copy_details key=%s", val, key)
+                            found = True
+                            break
                     except (TypeError, ValueError):
                         pass
+            if not found:
+                logger.info("copy_details received but no balance key found. Keys: %s", list(data.keys()))
     elif kind == "balance_history":
         rows = []
         if isinstance(data, dict):

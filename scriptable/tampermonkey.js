@@ -67,12 +67,15 @@
       return;
     }
 
-    // Broad sniff: any response with totalBalance/totalEquity
+    // Broad sniff: any response with balance-like fields
     if (typeof data === 'object' && data !== null) {
       const d = data.data || data;
+      // Check nested object for any balance/equity field
       if (d && typeof d === 'object' && !Array.isArray(d)) {
-        if (d.totalBalance !== undefined || d.totalEquity !== undefined) {
-          console.log('[Bitget Tracker] sniffed balance from', url);
+        const keys = Object.keys(d);
+        const balKey = keys.find(k => /balance|equity|totalBal|totalEquity/i.test(k));
+        if (balKey) {
+          console.log('[Bitget Tracker] sniffed balance from', url, 'key=', balKey);
           pushToTracker('copy_details', d);
           return;
         }
@@ -89,6 +92,11 @@
         }
       }
     }
+
+    // Debug: send ALL unclassified /v1/ responses so we can find the right fields
+    const snippet = JSON.stringify(data).slice(0, 500);
+    console.log('[Bitget Tracker] UNCLASSIFIED:', url, snippet);
+    pushToTracker('balance_sniff', { url, data });
   }
 
   // ── Intercept fetch ────────────────────────────────────────────────────────
