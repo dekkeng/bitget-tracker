@@ -1,0 +1,14 @@
+{
+  "name": "bitget-headless-scraper",
+  "version": "1.0.0",
+  "description": "Headless browser relay for Bitget CFD tracker",
+  "main": "scraper.js",
+  "scripts": {
+    "start": "node scraper.js",
+    "login": "node login.js"
+  },
+  "dependencies": {
+    "puppeteer": "^23.0.0",
+    "dotenv": "^16.4.0"
+  }
+}

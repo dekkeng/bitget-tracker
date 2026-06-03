@@ -184,10 +184,10 @@
 
   <!-- Waiting message shown until first push -->
   <div id="waiting-msg">
-    <strong>Waiting for browser data</strong>
-    Open your Bitget copy trading page in Chrome<br>
-    with the Tampermonkey script running.<br>
-    Data will appear within 60 seconds.
+    <strong>Waiting for data</strong>
+    Set up server-side polling below,<br>
+    or use the Tampermonkey script.<br>
+    <button id="open-cookie-btn" style="margin-top:14px;padding:10px 20px;border-radius:8px;border:none;background:var(--green);color:#000;font-weight:600;font-size:14px;cursor:pointer">Set Up Polling</button>
   </div>
 
   <!-- Main content (hidden until data arrives) -->
@@ -258,6 +258,45 @@
 <div id="install-banner">
   <p>Add to Home Screen for the best experience — tap Share then "Add to Home Screen"</p>
   <button id="install-close">✕</button>
+</div>
+
+<!-- Poller status bar -->
+<div id="poller-bar" style="display:none;margin:0 12px 12px;padding:10px 14px;background:var(--card);border:1px solid var(--border);border-radius:10px;font-size:12px;display:flex;align-items:center;justify-content:space-between;cursor:pointer" title="Click to update cookie">
+  <div>
+    <span id="poller-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px"></span>
+    <span id="poller-text" style="color:var(--muted)">Poller</span>
+  </div>
+  <span id="poller-last" style="color:var(--muted);font-size:11px"></span>
+</div>
+
+<div class="modal-overlay" id="cookie-modal">
+  <div class="modal-box" style="width:min(400px,92vw)">
+    <div class="modal-title">Server-Side Polling</div>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:14px;line-height:1.5">
+      Paste your Bitget cookie so the server can fetch data automatically — no need to keep your PC on.
+    </p>
+    <details style="font-size:12px;color:var(--muted);margin-bottom:14px;cursor:pointer">
+      <summary style="color:var(--green);font-weight:600">How to get your cookie</summary>
+      <ol style="margin-top:8px;padding-left:18px;line-height:1.8">
+        <li>Open <strong>bitget.com</strong> and log in</li>
+        <li>Press <strong>F12</strong> → <strong>Network</strong> tab</li>
+        <li>Click any page or refresh</li>
+        <li>Click any request to <strong>bitget.com</strong></li>
+        <li>Find <strong>Cookie</strong> in Request Headers</li>
+        <li>Right-click → Copy value</li>
+        <li>Paste it below</li>
+      </ol>
+    </details>
+    <div class="modal-field">
+      <label>Cookie header value</label>
+      <textarea id="input-cookie" rows="4" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;color:var(--text);font-size:12px;font-family:monospace;outline:none;resize:vertical" placeholder="Paste cookie string here..."></textarea>
+    </div>
+    <div id="cookie-status" style="font-size:12px;margin-bottom:12px;display:none"></div>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="cookie-cancel">Cancel</button>
+      <button class="btn-save" id="cookie-test">Test & Save</button>
+    </div>
+  </div>
 </div>
 
 <div class="modal-overlay" id="settings-modal">
@@ -523,6 +562,82 @@
     modal.classList.remove('active');
     fetchData();
   });
+
+  // ── Cookie / Poller management ──────────────────────────────────────────
+  const cookieModal = document.getElementById('cookie-modal');
+  const cookieInput = document.getElementById('input-cookie');
+  const cookieStatus = document.getElementById('cookie-status');
+
+  function openCookieModal() {
+    cookieStatus.style.display = 'none';
+    fetch('/api/poller').then(r => r.json()).then(s => {
+      if (s.has_cookie) cookieInput.value = '(cookie already set — paste new one to replace)';
+      else cookieInput.value = '';
+      cookieModal.classList.add('active');
+    });
+  }
+
+  document.getElementById('open-cookie-btn')?.addEventListener('click', openCookieModal);
+  document.getElementById('poller-bar')?.addEventListener('click', openCookieModal);
+  document.getElementById('cookie-cancel').addEventListener('click', () => cookieModal.classList.remove('active'));
+  cookieModal.addEventListener('click', e => { if (e.target === cookieModal) cookieModal.classList.remove('active'); });
+
+  document.getElementById('cookie-test').addEventListener('click', async () => {
+    const raw = cookieInput.value.trim();
+    if (!raw || raw.startsWith('(')) {
+      cookieStatus.style.display = 'block';
+      cookieStatus.innerHTML = '<span class="amber">Paste your cookie first</span>';
+      return;
+    }
+    cookieStatus.style.display = 'block';
+    cookieStatus.innerHTML = '<span style="color:var(--muted)">Saving & testing...</span>';
+
+    await fetch('/api/poller/cookie', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookie: raw }),
+    });
+
+    const test = await fetch('/api/poller/test').then(r => r.json());
+    if (test.ok && test.positions_found >= 0) {
+      cookieStatus.innerHTML = '<span class="green">Connected! Found ' + test.positions_found + ' positions. Polling active.</span>';
+      setTimeout(() => {
+        cookieModal.classList.remove('active');
+        fetchData();
+        updatePollerBar();
+      }, 1500);
+    } else {
+      cookieStatus.innerHTML = '<span class="red">Failed: ' + (test.error || 'status ' + test.status) + '. Check your cookie.</span>';
+    }
+  });
+
+  async function updatePollerBar() {
+    try {
+      const s = await fetch('/api/poller').then(r => r.json());
+      const bar = document.getElementById('poller-bar');
+      bar.style.display = 'flex';
+      const dot = document.getElementById('poller-dot');
+      const text = document.getElementById('poller-text');
+      const last = document.getElementById('poller-last');
+
+      if (!s.has_cookie) {
+        dot.style.background = 'var(--amber)';
+        text.textContent = 'Poller: no cookie set';
+        last.textContent = 'tap to set up';
+      } else if (s.last_error) {
+        dot.style.background = 'var(--red)';
+        text.textContent = 'Poller: error';
+        last.textContent = s.last_error.slice(0, 40);
+      } else {
+        dot.style.background = 'var(--green)';
+        text.textContent = 'Poller: active (' + s.polls + ' polls)';
+        last.textContent = s.last_poll ? 'Last: ' + s.last_poll.split(' ')[1] : '';
+      }
+    } catch (_) {}
+  }
+
+  updatePollerBar();
+  setInterval(updatePollerBar, 15_000);
 </script>
 </body>
 </html>

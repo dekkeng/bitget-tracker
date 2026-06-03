@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 settings.json
+cookies.json
+headless/browser-data/
+headless/node_modules/
+headless/.env

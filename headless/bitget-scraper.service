@@ -1,0 +1,15 @@
+[Unit]
+Description=Bitget CFD Headless Scraper
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/bitget-scraper
+ExecStart=/usr/bin/node scraper.js
+Restart=always
+RestartSec=30
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
