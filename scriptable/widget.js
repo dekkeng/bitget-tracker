@@ -117,54 +117,51 @@ const family = config.widgetFamily;
 // LOCK SCREEN — accessoryRectangular (small rectangle on lock screen)
 // ═══════════════════════════════════════════════════════════════════════════
 if (family === "accessoryRectangular") {
-  const w = new ListWidget();
-  w.setPadding(0, 0, 0, 0);
+  const lw = new ListWidget();
+  lw.setPadding(0, 0, 0, 0);
+
+  const pnlStr = (pnl >= 0 ? "+" : "-") + fmtUSD(pnl);
+  const oPnlStr = (oPnl >= 0 ? "+" : "-") + fmtUSD(oPnl);
+  const allStr = (allPnl >= 0 ? "+" : "-") + fmtUSD(allPnl);
+  const oPnlC = oPnl >= 0 ? GREEN : RED;
+  const allC = allPnl >= 0 ? GREEN : RED;
+  const posLabel = nPos === 1 ? "1 position" : nPos + " positions";
 
   // Row 1: Bal  $1,005.53
-  const r1 = w.addStack();
+  const r1 = lw.addStack();
   r1.layoutHorizontally();
   r1.centerAlignContent();
-  txt(r1, "Bal", 11, MUTED, true);
-  r1.addSpacer(4);
-  txt(r1, fmtUSD(bal), 11, WHITE, true);
+  txt(r1, "Bal  " + fmtUSD(bal), 12, WHITE, true);
   r1.addSpacer();
-  if (stale) txt(r1, "⚠", 9, AMBER);
+  if (stale) { txt(r1, "stale", 10, AMBER); }
 
-  w.addSpacer(1);
+  lw.addSpacer(1);
 
   // Row 2: Today  +$39.42
-  const r2 = w.addStack();
+  const r2 = lw.addStack();
   r2.layoutHorizontally();
   r2.centerAlignContent();
-  txt(r2, "Today", 10, MUTED);
-  r2.addSpacer(4);
-  txt(r2, fmtPnL(pnl), 11, pnlColor, true);
+  txt(r2, "Today  ", 10, MUTED);
+  txt(r2, pnlStr, 12, pnlColor, true);
 
-  w.addSpacer(1);
+  lw.addSpacer(1);
 
-  // Row 3: Open +$0.00 │ 0 position
-  const r3 = w.addStack();
+  // Row 3: Open +$0.00 | 0 positions
+  const r3 = lw.addStack();
   r3.layoutHorizontally();
   r3.centerAlignContent();
-  const oPnlC = oPnl >= 0 ? GREEN : RED;
-  txt(r3, "Open " + fmtPnL(oPnl), 9, oPnlC);
-  r3.addSpacer(4);
-  txt(r3, "│", 9, MUTED);
-  r3.addSpacer(4);
-  txt(r3, nPos + " position" + (nPos !== 1 ? "s" : ""), 9, WHITE);
+  txt(r3, "Open " + oPnlStr + "  |  " + posLabel, 10, oPnlC);
 
-  w.addSpacer(1);
+  lw.addSpacer(1);
 
-  // Row 4: All time +$81.17
-  const r4 = w.addStack();
+  // Row 4: All time  +$81.17
+  const r4 = lw.addStack();
   r4.layoutHorizontally();
   r4.centerAlignContent();
-  const allC = allPnl >= 0 ? GREEN : RED;
-  txt(r4, "All time", 10, MUTED);
-  r4.addSpacer(4);
-  txt(r4, fmtPnL(allPnl), 11, allC, true);
+  txt(r4, "All time  ", 10, MUTED);
+  txt(r4, allStr, 12, allC, true);
 
-  Script.setWidget(w);
+  Script.setWidget(lw);
   Script.complete();
   return;
 }
