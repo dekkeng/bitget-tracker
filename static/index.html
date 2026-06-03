@@ -59,6 +59,19 @@
       color: var(--muted); margin-bottom: 8px;
     }
 
+    /* Balance bar */
+    .balance-bar {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 0 12px 12px;
+    }
+    .balance-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 14px; padding: 14px 12px; cursor: pointer;
+      transition: border-color 0.2s;
+    }
+    .balance-card:active { border-color: var(--green); }
+    .balance-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 6px; }
+    .balance-val { font-size: 22px; font-weight: 700; line-height: 1; }
+
     /* Hero PnL */
     .hero-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin: 0 12px 12px; }
     .hero-card {
@@ -67,6 +80,33 @@
     }
     .hero-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 6px; }
     .hero-val { font-size: 20px; font-weight: 700; line-height: 1; }
+
+    /* Settings modal */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+      display: none; align-items: center; justify-content: center; z-index: 500;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal-box {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 16px; padding: 24px 20px; width: min(340px, 90vw);
+    }
+    .modal-title { font-size: 16px; font-weight: 700; margin-bottom: 16px; }
+    .modal-field { margin-bottom: 14px; }
+    .modal-field label { display: block; font-size: 11px; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; letter-spacing: 0.5px; }
+    .modal-field input {
+      width: 100%; background: var(--bg); border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px 12px; color: var(--text); font-size: 16px;
+      outline: none;
+    }
+    .modal-field input:focus { border-color: var(--green); }
+    .modal-actions { display: flex; gap: 10px; margin-top: 18px; }
+    .modal-actions button {
+      flex: 1; padding: 10px; border-radius: 8px; border: none; font-size: 14px;
+      font-weight: 600; cursor: pointer;
+    }
+    .btn-cancel { background: var(--border); color: var(--text); }
+    .btn-save { background: var(--green); color: #000; }
 
     .big-pnl { font-size: 36px; font-weight: 700; line-height: 1; margin-bottom: 6px; }
     .big-sub  { font-size: 14px; }
@@ -153,6 +193,18 @@
   <!-- Main content (hidden until data arrives) -->
   <div id="content" style="display:none">
 
+    <!-- Balance & Investment -->
+    <div class="balance-bar">
+      <div class="balance-card" id="bal-card" title="Tap to edit">
+        <div class="balance-label">Balance (USDT)</div>
+        <div id="total-balance" class="balance-val">—</div>
+      </div>
+      <div class="balance-card" id="inv-card" title="Tap to edit">
+        <div class="balance-label">Cumulative Investment</div>
+        <div id="total-investment" class="balance-val">—</div>
+      </div>
+    </div>
+
     <!-- Hero: Daily PnL -->
     <div class="card">
       <div class="card-label">Daily P&amp;L (Bangkok)</div>
@@ -208,6 +260,24 @@
   <button id="install-close">✕</button>
 </div>
 
+<div class="modal-overlay" id="settings-modal">
+  <div class="modal-box">
+    <div class="modal-title">Update Balance & Investment</div>
+    <div class="modal-field">
+      <label>Total Balance (USDT)</label>
+      <input type="number" id="input-balance" inputmode="decimal" step="0.01" placeholder="0.00" />
+    </div>
+    <div class="modal-field">
+      <label>Cumulative Investment (USDT)</label>
+      <input type="number" id="input-investment" inputmode="decimal" step="0.01" placeholder="0.00" />
+    </div>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="modal-cancel">Cancel</button>
+      <button class="btn-save" id="modal-save">Save</button>
+    </div>
+  </div>
+</div>
+
 <script>
   let lastFetchTime = null, ageInterval = null;
 
@@ -215,6 +285,10 @@
     if (n == null) return '—';
     const abs = Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
     return (n < 0 ? '-' : '+') + '$' + abs;
+  }
+  function fmtBal(n) {
+    if (n == null || n === 0) return '$0.00';
+    return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
   function colorClass(n) { return n >= 0 ? 'green' : 'red'; }
 
@@ -329,6 +403,10 @@
       lastFetchTime = Date.now();
       startAgeTicker();
 
+      // Balance & Investment
+      document.getElementById('total-balance').textContent = fmtBal(mt5.total_balance);
+      document.getElementById('total-investment').textContent = fmtBal(mt5.total_investment);
+
       // Daily PnL
       const dcls = colorClass(mt5.daily_pnl);
       const dpEl = document.getElementById('daily-pnl');
@@ -413,6 +491,37 @@
   window.addEventListener('resize', () => {
     const c = document.getElementById('chart-canvas');
     if (c._history) drawChart(c._history);
+  });
+
+  // Settings modal
+  const modal = document.getElementById('settings-modal');
+  const inputBal = document.getElementById('input-balance');
+  const inputInv = document.getElementById('input-investment');
+
+  function openSettings() {
+    fetch('/api/settings').then(r => r.json()).then(s => {
+      inputBal.value = s.balance || '';
+      inputInv.value = s.investment || '';
+      modal.classList.add('active');
+    });
+  }
+
+  document.getElementById('bal-card').addEventListener('click', openSettings);
+  document.getElementById('inv-card').addEventListener('click', openSettings);
+  document.getElementById('modal-cancel').addEventListener('click', () => modal.classList.remove('active'));
+  modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('active'); });
+
+  document.getElementById('modal-save').addEventListener('click', async () => {
+    const body = {};
+    if (inputBal.value !== '') body.balance = parseFloat(inputBal.value) || 0;
+    if (inputInv.value !== '') body.investment = parseFloat(inputInv.value) || 0;
+    await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    modal.classList.remove('active');
+    fetchData();
   });
 </script>
 </body>

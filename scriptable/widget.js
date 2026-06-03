@@ -10,6 +10,7 @@ const AMBER  = new Color("#f59e0b");
 const WHITE  = new Color("#ffffff");
 const MUTED  = new Color("#888888");
 const BG     = new Color("#111111");
+const SEP_C  = new Color("#333333");
 
 // ── First-run setup (only when running inside the app, not as a widget) ──
 if (!config.runsInWidget) {
@@ -40,7 +41,7 @@ if (!config.runsInWidget) {
 // ── Widget mode ──
 const widget = new ListWidget();
 widget.backgroundColor = BG;
-widget.setPadding(12, 14, 12, 14);
+widget.setPadding(8, 10, 8, 10);
 widget.url = Keychain.contains(KEYCHAIN_KEY) ? Keychain.get(KEYCHAIN_KEY) : "";
 
 async function fetchData(baseUrl) {
@@ -50,7 +51,6 @@ async function fetchData(baseUrl) {
     const data = await req.loadJSON();
     return { data, stale: data.stale || false };
   } catch (e) {
-    // Try to return cached value from Keychain if available
     const cached = Keychain.contains("bitget_widget_cache")
       ? JSON.parse(Keychain.get("bitget_widget_cache"))
       : null;
@@ -58,27 +58,28 @@ async function fetchData(baseUrl) {
   }
 }
 
-function addRow(widget, justify = "left") {
-  const stack = widget.addStack();
-  stack.layoutHorizontally();
-  stack.centerAlignContent();
-  if (justify === "space-between") stack.addSpacer();
-  return stack;
-}
-
 function txt(stack, content, size, color, bold = false) {
   const t = stack.addText(content);
   t.font = bold ? Font.boldSystemFont(size) : Font.systemFont(size);
   t.textColor = color;
+  t.lineLimit = 1;
   return t;
+}
+
+function fmtUSD(n) {
+  if (n == null) return "$0.00";
+  return "$" + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function fmtPnL(n) {
+  return (n >= 0 ? "+" : "-") + fmtUSD(n);
 }
 
 // ── Build widget ──
 if (!Keychain.contains(KEYCHAIN_KEY)) {
-  // Not configured
   const row = widget.addStack();
   const t = row.addText("⚙ Open Scriptable & run\nthis script to set up.");
-  t.font = Font.systemFont(12);
+  t.font = Font.systemFont(10);
   t.textColor = MUTED;
   t.centerAlignText();
   Script.setWidget(widget);
@@ -92,7 +93,7 @@ const { data, stale } = await fetchData(baseUrl);
 if (!data) {
   const row = widget.addStack();
   const t = row.addText("⚠ No data\nCheck server");
-  t.font = Font.boldSystemFont(14);
+  t.font = Font.boldSystemFont(11);
   t.textColor = AMBER;
   t.centerAlignText();
   Script.setWidget(widget);
@@ -100,79 +101,92 @@ if (!data) {
   return;
 }
 
-// Cache for offline fallback
 Keychain.set("bitget_widget_cache", JSON.stringify(data));
 
-const pnl    = data.daily_pnl    ?? 0;
-const pnlPct = data.daily_pnl_pct ?? 0;
+const pnl    = data.daily_pnl ?? 0;
 const bal    = data.total_balance ?? 0;
+const inv    = data.total_investment ?? 0;
 const nPos   = data.open_positions ?? 0;
 const oPnl   = data.open_positions_pnl ?? 0;
+const allPnl = data.all_time_pnl ?? 0;
 const updAt  = data.updated_at ?? "--:--";
 
 const pnlColor = pnl >= 0 ? GREEN : RED;
 
-// ── Row 1: BITGET label | updated_at | stale ──
+// ── Row 1: Header ──
 const row1 = widget.addStack();
 row1.layoutHorizontally();
 row1.centerAlignContent();
-txt(row1, "BITGET", 10, MUTED, false);
+txt(row1, "BITGET", 8, MUTED, true);
+row1.addSpacer(4);
+txt(row1, "· DKTrading", 8, MUTED);
 row1.addSpacer();
-if (stale) txt(row1, "⚠ stale  ", 10, AMBER, false);
-txt(row1, updAt, 10, MUTED, false);
+if (stale) { txt(row1, "⚠", 8, AMBER); row1.addSpacer(2); }
+txt(row1, updAt, 8, MUTED);
 
-widget.addSpacer(6);
+widget.addSpacer(4);
 
-// ── Row 2: Daily P&L (big) ──
-const pnlStr = (pnl >= 0 ? "+" : "-") + "$" + Math.abs(pnl).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// ── Row 2: Balance & Investment side by side ──
 const row2 = widget.addStack();
-txt(row2, pnlStr, 28, pnlColor, true);
+row2.layoutHorizontally();
+
+const balCol = row2.addStack();
+balCol.layoutVertically();
+txt(balCol, "BALANCE", 7, MUTED);
+txt(balCol, fmtUSD(bal), 13, WHITE, true);
+
+row2.addSpacer();
+
+const invCol = row2.addStack();
+invCol.layoutVertically();
+txt(invCol, "INVESTED", 7, MUTED);
+txt(invCol, fmtUSD(inv), 13, WHITE, true);
+
+widget.addSpacer(3);
+
+// ── Separator ──
+const sepRow = widget.addStack();
+const sep = sepRow.addText("───────────────────────");
+sep.font = Font.systemFont(5);
+sep.textColor = SEP_C;
+
+widget.addSpacer(3);
+
+// ── Row 3: Daily PnL (big) ──
+const row3 = widget.addStack();
+row3.layoutHorizontally();
+row3.centerAlignContent();
+txt(row3, "TODAY", 7, MUTED);
+row3.addSpacer(6);
+txt(row3, fmtPnL(pnl), 16, pnlColor, true);
+row3.addSpacer();
 
 widget.addSpacer(2);
 
-// ── Row 3: P&L % ──
-const pctStr = (pnlPct >= 0 ? "+" : "") + pnlPct.toFixed(2) + "% today";
-const row3 = widget.addStack();
-txt(row3, pctStr, 14, pnlColor, false);
-
-widget.addSpacer(8);
-
-// ── Row 4: Balance | Positions ──
+// ── Row 4: Open PnL | Positions | All-time ──
 const row4 = widget.addStack();
 row4.layoutHorizontally();
 
-const balStack = row4.addStack();
-balStack.layoutVertically();
-txt(balStack, "Balance", 10, MUTED, false);
-const balStr = "$" + bal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-txt(balStack, balStr, 13, WHITE, true);
+const col1 = row4.addStack();
+col1.layoutVertically();
+txt(col1, "OPEN PNL", 7, MUTED);
+const oPnlColor = oPnl >= 0 ? GREEN : RED;
+txt(col1, fmtPnL(oPnl), 10, oPnlColor, true);
 
 row4.addSpacer();
 
-const posStack = row4.addStack();
-posStack.layoutVertically();
-txt(posStack, "Positions", 10, MUTED, false);
-txt(posStack, String(nPos), 13, WHITE, true);
+const col2 = row4.addStack();
+col2.layoutVertically();
+txt(col2, "POSITIONS", 7, MUTED);
+txt(col2, String(nPos), 10, WHITE, true);
 
-widget.addSpacer(6);
+row4.addSpacer();
 
-// ── Row 5: Open PnL (if any open positions) ──
-if (nPos > 0) {
-  // Separator
-  const sepStack = widget.addStack();
-  const sep = sepStack.addText("─────────────────");
-  sep.font = Font.systemFont(8);
-  sep.textColor = new Color("#333333");
-
-  widget.addSpacer(4);
-
-  const oPnlStr = (oPnl >= 0 ? "+" : "-") + "$" + Math.abs(oPnl).toFixed(2);
-  const oPnlColor = oPnl >= 0 ? GREEN : RED;
-  const row5 = widget.addStack();
-  row5.layoutHorizontally();
-  txt(row5, "open PnL: ", 11, MUTED, false);
-  txt(row5, oPnlStr, 11, oPnlColor, true);
-}
+const col3 = row4.addStack();
+col3.layoutVertically();
+txt(col3, "ALL-TIME", 7, MUTED);
+const allColor = allPnl >= 0 ? GREEN : RED;
+txt(col3, fmtPnL(allPnl), 10, allColor, true);
 
 Script.setWidget(widget);
 Script.complete();

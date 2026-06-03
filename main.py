@@ -1,5 +1,8 @@
+import json
 import logging
+import os
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -23,6 +26,24 @@ app.add_middleware(
 )
 
 BKK = timezone(timedelta(hours=7))
+
+SETTINGS_FILE = Path(os.environ.get("SETTINGS_PATH", "settings.json"))
+
+
+def _load_settings() -> dict:
+    if SETTINGS_FILE.exists():
+        try:
+            return json.loads(SETTINGS_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"balance": 0.0, "investment": 0.0}
+
+
+def _save_settings(s: dict) -> None:
+    SETTINGS_FILE.write_text(json.dumps(s))
+
+
+_settings = _load_settings()
 
 
 # ── Time helpers ──────────────────────────────────────────────────────────────
@@ -164,14 +185,13 @@ def _rebuild_summary() -> None:
     )
     all_time_pnl = sum(t["pnl"] for t in trades)
 
-    balance = _parse_balance(_mt5["balance_raw"])
-
     _mt5["summary"] = {
         "daily_pnl": round(daily_pnl, 4),
         "open_positions": len(positions),
         "open_positions_pnl": round(open_pnl, 4),
         "all_time_pnl": round(all_time_pnl, 4),
-        "total_balance": balance,
+        "total_balance": _settings.get("balance", 0.0),
+        "total_investment": _settings.get("investment", 0.0),
         "pushed_at": _mt5["pushed_at"],
     }
     _mt5["trades"]  = trades
@@ -185,8 +205,26 @@ def _rebuild_summary() -> None:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+def _calc_investment(rows: list) -> float:
+    total = 0.0
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        typ = str(r.get("type") or r.get("typeName") or "").lower()
+        try:
+            amt = abs(float(r.get("amount") or r.get("changeAmount") or 0))
+        except (TypeError, ValueError):
+            continue
+        if "add" in typ or "deposit" in typ or "transfer in" in typ:
+            total += amt
+        elif "transfer out" in typ or "withdraw" in typ:
+            total -= amt
+    return round(total, 2)
+
+
 @app.post("/api/push/mt5")
 async def push_mt5(request: Request):
+    global _settings
     body = await request.json()
     kind = body.get("kind")
     data = body.get("data")
@@ -196,17 +234,40 @@ async def push_mt5(request: Request):
         _mt5["pushed_at"] = datetime.now(BKK).strftime("%H:%M")
     elif kind == "history":
         _mt5["history_raw"] = data
+    elif kind == "copy_details":
+        if isinstance(data, dict):
+            for key in ("totalBalance", "total_balance", "totalEquity", "balance"):
+                val = data.get(key)
+                if val is not None:
+                    try:
+                        _settings["balance"] = round(float(val), 2)
+                        _save_settings(_settings)
+                        logger.info("Auto-updated balance=%.2f from copy_details", _settings["balance"])
+                        break
+                    except (TypeError, ValueError):
+                        pass
+    elif kind == "balance_history":
+        rows = []
+        if isinstance(data, dict):
+            rows = data.get("rows") or data.get("list") or data.get("data") or []
+        elif isinstance(data, list):
+            rows = data
+        if rows:
+            _mt5["balance_history_raw"] = rows
+            inv = _calc_investment(rows)
+            _settings["investment"] = inv
+            _save_settings(_settings)
+            logger.info("Auto-updated investment=%.2f from %d balance_history rows", inv, len(rows))
     elif kind == "balance":
         _mt5["balance_raw"] = data
     elif kind == "balance_sniff":
         url = data.get("url", "")
         payload = data.get("data", {})
         logger.info("SNIFF url=%s data=%s", url, str(payload)[:300])
-        # Store latest sniff for inspection
         if "balance_sniffs" not in _mt5:
             _mt5["balance_sniffs"] = []
         _mt5["balance_sniffs"].append({"url": url, "data": payload})
-        _mt5["balance_sniffs"] = _mt5["balance_sniffs"][-20:]  # keep last 20
+        _mt5["balance_sniffs"] = _mt5["balance_sniffs"][-20:]
 
     if _mt5["positions_raw"] is not None:
         _rebuild_summary()
@@ -267,18 +328,48 @@ async def get_mt5_raw():
     }
 
 
+@app.get("/api/settings")
+async def get_settings():
+    return _settings
+
+
+@app.post("/api/settings")
+async def post_settings(request: Request):
+    global _settings
+    body = await request.json()
+    if "balance" in body:
+        _settings["balance"] = round(float(body["balance"]), 2)
+    if "investment" in body:
+        _settings["investment"] = round(float(body["investment"]), 2)
+    _save_settings(_settings)
+    if _mt5["positions_raw"] is not None:
+        _rebuild_summary()
+    return _settings
+
+
 @app.get("/api/widget")
 async def get_widget():
     s = _mt5["summary"]
     if not s:
-        return {"error": "No data — open Bitget in browser", "stale": True}
+        return {
+            "daily_pnl": 0.0,
+            "daily_pnl_pct": 0.0,
+            "open_positions": 0,
+            "open_positions_pnl": 0.0,
+            "all_time_pnl": 0.0,
+            "total_balance": _settings.get("balance", 0.0),
+            "total_investment": _settings.get("investment", 0.0),
+            "updated_at": datetime.now(BKK).strftime("%H:%M"),
+            "stale": True,
+        }
     return {
         "daily_pnl": s["daily_pnl"],
         "daily_pnl_pct": 0.0,
         "open_positions": s["open_positions"],
         "open_positions_pnl": s["open_positions_pnl"],
         "all_time_pnl": s["all_time_pnl"],
-        "total_balance": s.get("total_balance", 0.0),
+        "total_balance": _settings.get("balance", 0.0),
+        "total_investment": _settings.get("investment", 0.0),
         "updated_at": datetime.now(BKK).strftime("%H:%M"),
         "stale": False,
     }
