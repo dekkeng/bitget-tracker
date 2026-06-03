@@ -277,15 +277,38 @@
     </p>
     <details style="font-size:12px;color:var(--muted);margin-bottom:14px;cursor:pointer">
       <summary style="color:var(--green);font-weight:600">How to get your cookie</summary>
-      <ol style="margin-top:8px;padding-left:18px;line-height:1.8">
-        <li>Open <strong>bitget.com</strong> and log in</li>
-        <li>Press <strong>F12</strong> → <strong>Network</strong> tab</li>
-        <li>Click any page or refresh</li>
-        <li>Click any request to <strong>bitget.com</strong></li>
-        <li>Find <strong>Cookie</strong> in Request Headers</li>
-        <li>Right-click → Copy value</li>
-        <li>Paste it below</li>
-      </ol>
+      <div id="cookie-instructions-desktop" style="margin-top:8px">
+        <p style="font-weight:600;margin-bottom:4px">Desktop (Chrome / Firefox)</p>
+        <ol style="padding-left:18px;line-height:1.8">
+          <li>Open <strong>bitget.com</strong> and log in</li>
+          <li>Press <strong>F12</strong> → <strong>Network</strong> tab</li>
+          <li>Refresh the page</li>
+          <li>Click any request to <strong>bitget.com</strong></li>
+          <li>Find <strong>Cookie</strong> in Request Headers</li>
+          <li>Right-click → Copy value</li>
+          <li>Paste it below</li>
+        </ol>
+      </div>
+      <div id="cookie-instructions-iphone" style="margin-top:10px">
+        <p style="font-weight:600;margin-bottom:4px">iPhone (easiest: Proxyman)</p>
+        <ol style="padding-left:18px;line-height:1.8">
+          <li>Install <strong>Proxyman</strong> (free) from the App Store</li>
+          <li>Open Proxyman → follow the setup to install its CA certificate</li>
+          <li>Tap <strong>Start</strong> to begin intercepting</li>
+          <li>Open <strong>bitget.com</strong> in Safari and log in</li>
+          <li>Back in Proxyman, find any request to <strong>bitget.com</strong></li>
+          <li>Tap the request → <strong>Request</strong> tab → find <strong>Cookie</strong></li>
+          <li>Long-press → Copy → paste below</li>
+        </ol>
+        <p style="font-weight:600;margin-top:10px;margin-bottom:4px">iPhone (with a Mac)</p>
+        <ol style="padding-left:18px;line-height:1.8">
+          <li>iPhone Settings → Safari → Advanced → turn on <strong>Web Inspector</strong></li>
+          <li>Connect iPhone to Mac via USB</li>
+          <li>On Mac: Safari → <strong>Develop</strong> → [your iPhone] → [Bitget tab]</li>
+          <li>Open <strong>Network</strong> tab → find any request → Cookie header</li>
+          <li>Copy the value and paste below</li>
+        </ol>
+      </div>
     </details>
     <div class="modal-field">
       <label>Cookie header value</label>
