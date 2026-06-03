@@ -207,9 +207,26 @@
     const eq = eqMatch ? parseFloat(eqMatch[1].replace(/,/g, '')) : 0;
     const value = bal || eq;
 
-    if (value > 0) {
-      console.log('[Bitget Tracker] DOM scraped balance:', value);
-      pushToTracker('copy_details', { totalBalance: value, totalEquity: eq || value });
+    // Look for Est.net profit, Realized PnL, Unrealized PnL
+    const netMatch = text.match(/Est\.?\s*net\s*profit\s*\(?USDT\)?\s*[\n\r]*\s*[+\-]?([\d,]+\.?\d*)/i);
+    const realMatch = text.match(/Realized\s*PnL\s*\(?USDT\)?\s*[\n\r]*\s*[+\-]?([\d,]+\.?\d*)/i);
+    const unrealMatch = text.match(/Unrealized\s*PnL\s*\(?USDT\)?\s*[\n\r]*\s*[+\-]?([\d,]+\.?\d*)/i);
+
+    const netProfit = netMatch ? parseFloat(netMatch[1].replace(/,/g, '')) : null;
+    const realPnl = realMatch ? parseFloat(realMatch[1].replace(/,/g, '')) : null;
+    const unrealPnl = unrealMatch ? parseFloat(unrealMatch[1].replace(/,/g, '')) : null;
+
+    // Check sign (look for - before the number)
+    const netSign = netMatch && text.match(/Est\.?\s*net\s*profit\s*\(?USDT\)?\s*[\n\r]*\s*-/) ? -1 : 1;
+    const realSign = realMatch && text.match(/Realized\s*PnL\s*\(?USDT\)?\s*[\n\r]*\s*-/) ? -1 : 1;
+
+    if (value > 0 || netProfit !== null) {
+      const details = { totalBalance: value, totalEquity: eq || value };
+      if (netProfit !== null) details.estNetProfit = netProfit * netSign;
+      if (realPnl !== null) details.realizedPnl = realPnl * realSign;
+      if (unrealPnl !== null) details.unrealizedPnl = unrealPnl;
+      console.log('[Bitget Tracker] DOM scraped:', JSON.stringify(details));
+      pushToTracker('copy_details', details);
     }
 
     // Scrape balance history from full page text

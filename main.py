@@ -183,7 +183,11 @@ def _rebuild_summary() -> None:
         t["pnl"] for t in trades
         if today_start_ms <= t["close_time_ms"] < today_end_ms
     )
-    all_time_pnl = sum(t["pnl"] for t in trades)
+    trades_pnl = sum(t["pnl"] for t in trades)
+    # Prefer scraped Realized PnL from Bitget page (accurate), fall back to trades sum
+    all_time_pnl = _settings.get("realized_pnl", None)
+    if all_time_pnl is None:
+        all_time_pnl = trades_pnl
 
     _mt5["summary"] = {
         "daily_pnl": round(daily_pnl, 4),
@@ -236,21 +240,42 @@ async def push_mt5(request: Request):
         _mt5["history_raw"] = data
     elif kind == "copy_details":
         if isinstance(data, dict):
-            found = False
+            changed = False
+            # Extract balance
             for key in list(data.keys()):
                 if any(pat in key.lower() for pat in ("balance", "equity", "totalbal", "totalequity")):
                     try:
                         val = round(float(data[key]), 2)
                         if val > 0:
                             _settings["balance"] = val
-                            _save_settings(_settings)
-                            logger.info("Auto-updated balance=%.2f from copy_details key=%s", val, key)
-                            found = True
+                            changed = True
+                            logger.info("Auto-updated balance=%.2f from key=%s", val, key)
                             break
                     except (TypeError, ValueError):
                         pass
-            if not found:
-                logger.info("copy_details received but no balance key found. Keys: %s", list(data.keys()))
+            # Extract Est.net profit → use as all-time PnL
+            for key in ("estNetProfit", "est_net_profit", "netProfit"):
+                if key in data:
+                    try:
+                        val = round(float(data[key]), 2)
+                        _settings["all_time_pnl"] = val
+                        changed = True
+                        logger.info("Auto-updated all_time_pnl=%.2f from key=%s", val, key)
+                        break
+                    except (TypeError, ValueError):
+                        pass
+            # Extract Realized PnL
+            for key in ("realizedPnl", "realized_pnl", "realPnl"):
+                if key in data:
+                    try:
+                        _settings["realized_pnl"] = round(float(data[key]), 2)
+                        changed = True
+                    except (TypeError, ValueError):
+                        pass
+            if changed:
+                _save_settings(_settings)
+            else:
+                logger.info("copy_details received but no usable keys. Keys: %s", list(data.keys()))
     elif kind == "balance_history":
         rows = []
         if isinstance(data, dict):
