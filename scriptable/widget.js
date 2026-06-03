@@ -1,5 +1,5 @@
 // SETUP: In Scriptable, run this script once manually first.
-// It will prompt you to enter your server URL (e.g. https://bitget-tracker.onrender.com)
+// It will prompt you to enter your server URL (e.g. https://bitget-tracker-v2.onrender.com)
 // and save it to Keychain automatically.
 // Supports: Medium (home screen) and accessoryRectangular (lock screen).
 
@@ -17,8 +17,8 @@ if (!config.runsInWidget) {
   const stored = Keychain.contains(KEYCHAIN_KEY) ? Keychain.get(KEYCHAIN_KEY) : null;
   const prompt = new Alert();
   prompt.title = "Bitget Tracker Setup";
-  prompt.message = "Enter your server URL (e.g. https://bitget-tracker.onrender.com)";
-  prompt.addTextField("Server URL", stored || "https://bitget-tracker.onrender.com");
+  prompt.message = "Enter your server URL (e.g. https://bitget-tracker-v2.onrender.com)";
+  prompt.addTextField("Server URL", stored || "https://bitget-tracker-v2.onrender.com");
   prompt.addAction("Save");
   prompt.addCancelAction("Cancel");
   const idx = await prompt.presentAlert();
@@ -55,6 +55,7 @@ function txt(stack, content, size, color, bold = false) {
   t.font = bold ? Font.boldSystemFont(size) : Font.systemFont(size);
   t.textColor = color;
   t.lineLimit = 1;
+  t.minimumScaleFactor = 0.7;
   return t;
 }
 
@@ -193,15 +194,15 @@ row2.layoutHorizontally();
 
 const balCol = row2.addStack();
 balCol.layoutVertically();
-txt(balCol, "BALANCE", 9, MUTED);
-txt(balCol, fmtUSD(bal), 18, WHITE, true);
+txt(balCol, "BALANCE", 8, MUTED);
+txt(balCol, fmtUSD(bal), 16, WHITE, true);
 
 row2.addSpacer();
 
 const invCol = row2.addStack();
 invCol.layoutVertically();
-txt(invCol, "INVESTED", 9, MUTED);
-txt(invCol, fmtUSD(inv), 18, WHITE, true);
+txt(invCol, "INVESTED", 8, MUTED);
+txt(invCol, fmtUSD(inv), 16, WHITE, true);
 
 widget.addSpacer(6);
 
@@ -217,9 +218,9 @@ widget.addSpacer(6);
 const row3 = widget.addStack();
 row3.layoutHorizontally();
 row3.centerAlignContent();
-txt(row3, "TODAY", 9, MUTED);
+txt(row3, "TODAY", 8, MUTED);
 row3.addSpacer(8);
-txt(row3, fmtPnL(pnl), 22, pnlColor, true);
+txt(row3, fmtPnL(pnl), 20, pnlColor, true);
 row3.addSpacer();
 
 widget.addSpacer(6);
@@ -230,24 +231,24 @@ row4.layoutHorizontally();
 
 const col1 = row4.addStack();
 col1.layoutVertically();
-txt(col1, "OPEN PNL", 9, MUTED);
+txt(col1, "OPEN P&L", 8, MUTED);
 const oPnlColor = oPnl >= 0 ? GREEN : RED;
-txt(col1, fmtPnL(oPnl), 13, oPnlColor, true);
+txt(col1, fmtPnL(oPnl), 11, oPnlColor, true);
 
 row4.addSpacer();
 
 const col2 = row4.addStack();
 col2.layoutVertically();
-txt(col2, "POSITIONS", 9, MUTED);
-txt(col2, String(nPos), 13, WHITE, true);
+txt(col2, "POS", 8, MUTED);
+txt(col2, String(nPos), 11, WHITE, true);
 
 row4.addSpacer();
 
 const col3 = row4.addStack();
 col3.layoutVertically();
-txt(col3, "ALL-TIME", 9, MUTED);
+txt(col3, "ALL-TIME", 8, MUTED);
 const allColor = allPnl >= 0 ? GREEN : RED;
-txt(col3, fmtPnL(allPnl), 13, allColor, true);
+txt(col3, fmtPnL(allPnl), 11, allColor, true);
 
 Script.setWidget(widget);
 Script.complete();
