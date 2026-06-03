@@ -452,10 +452,9 @@
       dpEl.textContent = fmt(mt5.daily_pnl);
       dpEl.className = 'big-pnl ' + dcls;
       const dsEl = document.getElementById('daily-sub');
-      const todayTrades = trades.filter(t => {
-        const d = new Date(t.time);
-        return !isNaN(d);
-      }).length;
+      const bkkNow = new Date(Date.now() + 7 * 3600000);
+      const bkkToday = bkkNow.toISOString().slice(0, 10);
+      const todayTrades = trades.filter(t => t.time && t.time.startsWith(bkkToday)).length;
       dsEl.textContent = `${todayTrades} trade${todayTrades !== 1 ? 's' : ''} today`;
       dsEl.className = 'big-sub ' + dcls;
 
