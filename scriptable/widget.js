@@ -171,21 +171,21 @@ if (family === "accessoryRectangular") {
 // ═══════════════════════════════════════════════════════════════════════════
 const widget = new ListWidget();
 widget.backgroundColor = BG;
-widget.setPadding(8, 10, 8, 10);
+widget.setPadding(14, 14, 14, 14);
 widget.url = baseUrl;
 
 // Row 1: Header
 const row1 = widget.addStack();
 row1.layoutHorizontally();
 row1.centerAlignContent();
-txt(row1, "BITGET", 8, MUTED, true);
+txt(row1, "BITGET", 10, MUTED, true);
 row1.addSpacer(4);
-txt(row1, "· DKTrading", 8, MUTED);
+txt(row1, "· DKTrading", 10, MUTED);
 row1.addSpacer();
-if (stale) { txt(row1, "⚠", 8, AMBER); row1.addSpacer(2); }
-txt(row1, updAt, 8, MUTED);
+if (stale) { txt(row1, "⚠", 10, AMBER); row1.addSpacer(2); }
+txt(row1, updAt, 10, MUTED);
 
-widget.addSpacer(4);
+widget.addSpacer(6);
 
 // Row 2: Balance & Investment
 const row2 = widget.addStack();
@@ -193,36 +193,36 @@ row2.layoutHorizontally();
 
 const balCol = row2.addStack();
 balCol.layoutVertically();
-txt(balCol, "BALANCE", 7, MUTED);
-txt(balCol, fmtUSD(bal), 13, WHITE, true);
+txt(balCol, "BALANCE", 9, MUTED);
+txt(balCol, fmtUSD(bal), 18, WHITE, true);
 
 row2.addSpacer();
 
 const invCol = row2.addStack();
 invCol.layoutVertically();
-txt(invCol, "INVESTED", 7, MUTED);
-txt(invCol, fmtUSD(inv), 13, WHITE, true);
+txt(invCol, "INVESTED", 9, MUTED);
+txt(invCol, fmtUSD(inv), 18, WHITE, true);
 
-widget.addSpacer(3);
+widget.addSpacer(6);
 
 // Separator
 const sepRow = widget.addStack();
-const sep = sepRow.addText("───────────────────────");
-sep.font = Font.systemFont(5);
+const sep = sepRow.addText("─────────────────────────────");
+sep.font = Font.systemFont(6);
 sep.textColor = SEP_C;
 
-widget.addSpacer(3);
+widget.addSpacer(6);
 
 // Row 3: Daily PnL
 const row3 = widget.addStack();
 row3.layoutHorizontally();
 row3.centerAlignContent();
-txt(row3, "TODAY", 7, MUTED);
-row3.addSpacer(6);
-txt(row3, fmtPnL(pnl), 16, pnlColor, true);
+txt(row3, "TODAY", 9, MUTED);
+row3.addSpacer(8);
+txt(row3, fmtPnL(pnl), 22, pnlColor, true);
 row3.addSpacer();
 
-widget.addSpacer(2);
+widget.addSpacer(6);
 
 // Row 4: Open PnL | Positions | All-time
 const row4 = widget.addStack();
@@ -230,24 +230,24 @@ row4.layoutHorizontally();
 
 const col1 = row4.addStack();
 col1.layoutVertically();
-txt(col1, "OPEN PNL", 7, MUTED);
+txt(col1, "OPEN PNL", 9, MUTED);
 const oPnlColor = oPnl >= 0 ? GREEN : RED;
-txt(col1, fmtPnL(oPnl), 10, oPnlColor, true);
+txt(col1, fmtPnL(oPnl), 13, oPnlColor, true);
 
 row4.addSpacer();
 
 const col2 = row4.addStack();
 col2.layoutVertically();
-txt(col2, "POSITIONS", 7, MUTED);
-txt(col2, String(nPos), 10, WHITE, true);
+txt(col2, "POSITIONS", 9, MUTED);
+txt(col2, String(nPos), 13, WHITE, true);
 
 row4.addSpacer();
 
 const col3 = row4.addStack();
 col3.layoutVertically();
-txt(col3, "ALL-TIME", 7, MUTED);
+txt(col3, "ALL-TIME", 9, MUTED);
 const allColor = allPnl >= 0 ? GREEN : RED;
-txt(col3, fmtPnL(allPnl), 10, allColor, true);
+txt(col3, fmtPnL(allPnl), 13, allColor, true);
 
 Script.setWidget(widget);
 Script.complete();
