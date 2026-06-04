@@ -128,6 +128,21 @@ async def _poll_once(push_fn: Callable, cookie_str: str):
 
             page = await context.new_page()
 
+            # Capture every /v1/trace/mt5/ API call the page makes natively
+            captured_apis: dict = {}
+
+            async def _on_resp(resp):
+                if "/v1/trace/mt5/" not in resp.url:
+                    return
+                try:
+                    body = await resp.json()
+                    path = resp.url.split(".com")[-1].split("?")[0]
+                    captured_apis[path] = {"status": resp.status, "body": body}
+                except Exception:
+                    pass
+
+            page.on("response", _on_resp)
+
             async def _block(route):
                 if route.request.resource_type in {"document", "script", "xhr", "fetch"}:
                     await route.continue_()
@@ -137,16 +152,42 @@ async def _poll_once(push_fn: Callable, cookie_str: str):
             await page.route("**/*", _block)
             _status["browser_alive"] = True
 
+            # Navigate to the trader-detail page so Bitget's own JS fires its API calls.
+            # This reveals the actual balance endpoint the frontend uses.
+            trader_url = f"{BITGET_BASE}/copy-trading/mt5/trader-detail/{PORTFOLIO_ID}"
             try:
-                await page.goto(f"{BITGET_BASE}/about",
-                                wait_until="domcontentloaded", timeout=30_000)
-                logger.info("Navigation OK")
+                await page.goto(trader_url, wait_until="domcontentloaded", timeout=30_000)
+                await page.wait_for_timeout(5000)  # let JS make its API calls
+                logger.info("Trader page loaded; captured %d MT5 API responses", len(captured_apis))
             except Exception as e:
-                logger.info("Navigation ended early (%s) — continuing", e)
+                logger.info("Trader page nav ended (%s) — captured %d", e, len(captured_apis))
 
-            # Use page.evaluate so JavaScript fetch runs in browser context
-            # with full cookie access (credentials:include picks up cf_clearance etc.)
+            # Store all captured paths for inspection at /api/poller
+            _status["captured_api_paths"] = [
+                {"path": p, "code": (v["body"] or {}).get("code"),
+                 "keys": list((v["body"].get("data") or {}).keys())[:8]
+                         if isinstance((v["body"] or {}).get("data"), dict) else None}
+                for p, v in captured_apis.items()
+            ]
+
+            # Process any balance-looking response from the page load
+            for path, item in captured_apis.items():
+                body = item.get("body") or {}
+                code = body.get("code")
+                if code not in ("00000", "200", "0"):
+                    continue
+                data = body.get("data")
+                if isinstance(data, dict):
+                    keys = list(data.keys())
+                    _BAL_PATS = ("balance", "equity", "asset", "worth", "capital",
+                                 "amount", "profit", "pnl", "netval")
+                    if any(any(pat in k.lower() for pat in _BAL_PATS) for k in keys):
+                        logger.info("Balance found via page capture: %s keys=%s", path, keys[:8])
+                        push_fn("copy_details", data)
+
+            # Manual polls for positions & history (reliable, fast)
             await _active_poll(page, push_fn)
+            # Balance scan — will 404 on known paths but runs as fallback
             await _fetch_balance(page, push_fn)
 
             logger.info("Poll cycle complete — closing browser")
