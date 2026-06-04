@@ -478,6 +478,16 @@ async def get_widget():
             "updated_at": datetime.now(BKK).strftime("%H:%M"),
             "stale": True,
         }
+    pushed_at = s.get("pushed_at")
+    stale = True
+    if pushed_at:
+        try:
+            last = datetime.strptime(
+                datetime.now(BKK).strftime("%Y-%m-%d ") + pushed_at, "%Y-%m-%d %H:%M"
+            ).replace(tzinfo=BKK)
+            stale = (datetime.now(BKK) - last).total_seconds() > 600  # stale after 10 min
+        except Exception:
+            stale = False
     return {
         "daily_pnl": s["daily_pnl"],
         "daily_pnl_pct": 0.0,
@@ -486,8 +496,8 @@ async def get_widget():
         "all_time_pnl": s["all_time_pnl"],
         "total_balance": _settings.get("balance", 0.0),
         "total_investment": _settings.get("investment", 0.0),
-        "updated_at": datetime.now(BKK).strftime("%H:%M"),
-        "stale": False,
+        "updated_at": pushed_at or datetime.now(BKK).strftime("%H:%M"),
+        "stale": stale,
     }
 
 
