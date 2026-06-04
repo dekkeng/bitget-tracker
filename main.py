@@ -395,7 +395,10 @@ async def get_mt5_debug():
     return {
         "positions": {
             "raw_type": type(pos_raw).__name__,
+            "raw_full": pos_raw if isinstance(pos_raw, dict) and not pos_raw.get("data") else None,
             "raw_keys": list(pos_raw.keys()) if isinstance(pos_raw, dict) else None,
+            "api_code": pos_raw.get("code") if isinstance(pos_raw, dict) else None,
+            "api_msg": pos_raw.get("msg") if isinstance(pos_raw, dict) else None,
             "data_type": type(pos_raw.get("data")).__name__ if isinstance(pos_raw, dict) else None,
             "extracted_count": len(extracted_pos),
             "first_raw_item": extracted_pos[0] if extracted_pos else None,
@@ -404,7 +407,10 @@ async def get_mt5_debug():
         },
         "history": {
             "raw_type": type(hist_raw).__name__,
+            "raw_full": hist_raw if isinstance(hist_raw, dict) and not hist_raw.get("data") else None,
             "raw_keys": list(hist_raw.keys()) if isinstance(hist_raw, dict) else None,
+            "api_code": hist_raw.get("code") if isinstance(hist_raw, dict) else None,
+            "api_msg": hist_raw.get("msg") if isinstance(hist_raw, dict) else None,
             "extracted_count": len(extracted_hist),
             "first_raw_item": extracted_hist[0] if extracted_hist else None,
             "parsed_count": len(parsed_hist),
