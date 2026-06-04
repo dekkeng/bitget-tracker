@@ -154,23 +154,13 @@ async def _poll_once(push_fn: Callable, cookie_str: str):
             await page.route("**/*", _block)
             _status["browser_alive"] = True
 
-            # Navigate to the copy trading my-portfolio page so Bitget's JS fires API calls.
-            # Try a few URL patterns in case one redirects.
-            nav_urls = [
-                f"{BITGET_BASE}/copy-trading/mt5/myPortfolio",
-                f"{BITGET_BASE}/copy-trading/mt5/my-portfolio",
-                f"{BITGET_BASE}/copy-trading/personal",
-            ]
-            for nav_url in nav_urls:
-                try:
-                    await page.goto(nav_url, wait_until="domcontentloaded", timeout=20_000)
-                    await page.wait_for_timeout(4000)
-                    if captured_apis:
-                        logger.info("Captured %d API calls from %s", len(captured_apis), nav_url)
-                        break
-                    logger.info("No API calls captured from %s, trying next", nav_url)
-                except Exception as e:
-                    logger.info("Nav %s ended: %s", nav_url, e)
+            # Navigate to Bitget /about to pass Cloudflare, then manual fetches handle the rest.
+            try:
+                await page.goto(f"{BITGET_BASE}/about",
+                                wait_until="domcontentloaded", timeout=30_000)
+                logger.info("Navigation OK; captured %d API responses", len(captured_apis))
+            except Exception as e:
+                logger.info("Navigation ended early (%s)", e)
 
             # Store all captured paths for inspection at /api/poller
             _status["captured_api_paths"] = [
@@ -292,70 +282,50 @@ async def _active_poll(page, push_fn: Callable):
 
 
 async def _fetch_balance(page, push_fn: Callable):
-    # Phase 1: broad scan across many candidate paths to find which exist
-    scan = await page.evaluate("""async (pid) => {
-        const candidates = [
-            ['/v1/trace/mt5/data/traceHome',      'POST'],
-            ['/v1/trace/mt5/trace/traceHome',      'POST'],
-            ['/v1/trace/mt5/data/overview',         'POST'],
-            ['/v1/trace/mt5/trace/overview',        'POST'],
-            ['/v1/trace/mt5/data/traderInfo',       'POST'],
-            ['/v1/trace/mt5/trace/traderInfo',      'POST'],
-            ['/v1/trace/mt5/data/traderDetail',     'POST'],
-            ['/v1/trace/mt5/trace/traderDetail',    'POST'],
-            ['/v1/trace/mt5/data/portfolioInfo',    'POST'],
-            ['/v1/trace/mt5/trace/portfolioInfo',   'POST'],
-            ['/v1/trace/mt5/data/profitInfo',       'POST'],
-            ['/v1/trace/mt5/trace/profitInfo',      'POST'],
-            ['/v1/trace/mt5/data/summary',          'POST'],
-            ['/v1/trace/mt5/trace/summary',         'POST'],
-            ['/v1/trace/mt5/data/traceAmount',      'POST'],
-            ['/v1/trace/mt5/trace/traceAmount',     'POST'],
-            ['/v1/trace/mt5/data/capitalInfo',      'POST'],
-            ['/v1/trace/mt5/trace/capitalInfo',     'POST'],
-            ['/v1/trace/mt5/data/tracePortfolio',   'POST'],
-            ['/v1/trace/mt5/trace/tracePortfolio',  'POST'],
-            ['/v1/trace/mt5/data/traceAnalysis',    'POST'],
-            ['/v1/trace/mt5/trace/traceAnalysis',   'POST'],
-            ['/v1/trace/mt5/data/profitSummary',    'POST'],
-            ['/v1/trace/mt5/trace/profitSummary',   'POST'],
-        ];
-        const out = {};
-        for (const [ep, method] of candidates) {
-            try {
-                const r = await fetch(ep, {
-                    method, credentials: 'include',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({portfolioId: pid}),
-                });
-                const j = await r.json();
-                const d = j?.data;
-                out[ep.split('/').pop()] = {
-                    s: r.status, c: j?.code, msg: j?.msg,
-                    k: (d && typeof d==='object' && !Array.isArray(d)) ? Object.keys(d).slice(0,10) : null,
-                    sample: (d && typeof d==='object' && !Array.isArray(d))
-                        ? Object.fromEntries(Object.entries(d).slice(0,4).map(([k,v])=>[k,String(v).slice(0,40)]))
-                        : String(d).slice(0,80),
-                };
-            } catch(e) { out[ep.split('/').pop()] = {e: String(e).slice(0,40)}; }
-        }
-        return out;
-    }""", PORTFOLIO_ID)
-
-    _status["last_balance_probes"] = scan or {}
-    logger.info("Balance scan: %s", {k: v.get("s") for k, v in (scan or {}).items()})
-
-    # Phase 2: use any endpoint that returned success with data
-    _BAL_PATS = ("balance", "equity", "totalasset", "accountval", "worth", "asset",
-                 "capital", "amount", "profit", "pnl")
-    for ep_name, info in (scan or {}).items():
-        if info.get("s") != 200 or info.get("c") not in ("00000", "200", "0"):
-            continue
-        keys = info.get("k") or []
-        if not keys:
-            continue
-        # Fetch full data from this endpoint
+    # Endpoints discovered via Proxyman interception of the Bitget app.
+    # traderView is 90KB and is the most likely to contain balance data.
+    endpoints = [
+        "/v1/trace/mt5/public/traderView",
+        "/v1/trace/mt5/trace/getTraceUserInfo",
+        "/v1/trace/mt5/trace/queryFrozen",
+        "/v1/trace/mt5/trader/getTraderApplyProgress",
+        "/v1/trace/mt5/trace/getFollowPortfolios",
+    ]
+    _status["last_balance_probes"] = {}
+    for ep in endpoints:
         try:
+            result = await page.evaluate("""async ([ep, pid]) => {
+                try {
+                    const r = await fetch(ep, {
+                        method: 'POST', credentials: 'include',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({portfolioId: pid}),
+                    });
+                    const j = await r.json();
+                    const d = j?.data;
+                    return {
+                        status: r.status, code: j?.code, msg: j?.msg,
+                        keys: (d && typeof d==='object' && !Array.isArray(d))
+                            ? Object.keys(d).slice(0, 15) : null,
+                        sample: (d && typeof d==='object' && !Array.isArray(d))
+                            ? Object.fromEntries(Object.entries(d).slice(0,6).map(([k,v])=>[k,String(v).slice(0,50)]))
+                            : String(d).slice(0, 100),
+                    };
+                } catch(e) { return {status: 0, error: String(e)}; }
+            }""", [ep, PORTFOLIO_ID])
+
+            short = ep.split("/")[-1]
+            _status["last_balance_probes"][short] = result
+            logger.info("Balance %s → HTTP %s code=%s", short, result.get("status"), result.get("code"))
+
+            if result.get("status") != 200 or result.get("code") not in ("00000", "200", "0"):
+                continue
+
+            keys = result.get("keys") or []
+            if not keys:
+                continue
+
+            # Re-fetch to get the full data object
             full = await page.evaluate("""async ([ep, pid]) => {
                 try {
                     const r = await fetch(ep, {
@@ -366,26 +336,17 @@ async def _fetch_balance(page, push_fn: Callable):
                     const j = await r.json();
                     return j?.data || null;
                 } catch(e) { return null; }
-            }""", [f"/v1/trace/mt5/data/{ep_name}", PORTFOLIO_ID])
-            if not full:
-                full = await page.evaluate("""async ([ep, pid]) => {
-                    try {
-                        const r = await fetch(ep, {
-                            method: 'POST', credentials: 'include',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({portfolioId: pid}),
-                        });
-                        const j = await r.json();
-                        return j?.data || null;
-                    } catch(e) { return null; }
-                }""", [f"/v1/trace/mt5/trace/{ep_name}", PORTFOLIO_ID])
+            }""", [ep, PORTFOLIO_ID])
+
             if full and isinstance(full, dict):
-                logger.info("Using balance endpoint %s, keys: %s", ep_name, list(full.keys())[:8])
+                logger.info("Using balance from %s, keys: %s", short, list(full.keys())[:10])
                 push_fn("copy_details", full)
                 _status["last_scrape"] = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
                 _status["scrapes"] += 1
                 return
-        except Exception as e:
-            logger.warning("Balance full-fetch %s error: %s", ep_name, e)
 
-    logger.warning("No balance endpoint found after scanning %d candidates", len(scan or {}))
+        except Exception as e:
+            logger.warning("Balance %s error: %s", ep.split("/")[-1], e)
+            _status["last_balance_probes"][ep.split("/")[-1]] = {"error": str(e)}
+
+    logger.warning("No balance endpoint matched")
