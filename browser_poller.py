@@ -34,6 +34,8 @@ _status = {
     "polls": 0,
     "scrapes": 0,
     "pushes": 0,
+    "last_pos_response": None,
+    "last_hist_response": None,
 }
 
 
@@ -168,8 +170,12 @@ async def _active_poll(page, push_fn: Callable):
             } catch(e) { return {status: 0, error: String(e)}; }
         }""", PORTFOLIO_ID)
         api_code = (pos.get("data") or {}).get("code")
-        logger.info("Positions: HTTP %s api_code=%s msg=%s",
-                    pos.get("status"), api_code, (pos.get("data") or {}).get("msg"))
+        api_msg  = (pos.get("data") or {}).get("msg")
+        logger.info("Positions: HTTP %s api_code=%s msg=%s", pos.get("status"), api_code, api_msg)
+        _status["last_pos_response"] = {
+            "http": pos.get("status"), "code": api_code, "msg": api_msg,
+            "data_preview": str(pos.get("data"))[:200] if pos.get("data") else None,
+        }
         if pos.get("status") == 200 and api_code == "00000":
             push_fn("positions", pos["data"])
     except Exception as e:
@@ -188,8 +194,12 @@ async def _active_poll(page, push_fn: Callable):
             } catch(e) { return {status: 0, error: String(e)}; }
         }""", PORTFOLIO_ID)
         api_code = (hist.get("data") or {}).get("code")
-        logger.info("History: HTTP %s api_code=%s msg=%s",
-                    hist.get("status"), api_code, (hist.get("data") or {}).get("msg"))
+        api_msg  = (hist.get("data") or {}).get("msg")
+        logger.info("History: HTTP %s api_code=%s msg=%s", hist.get("status"), api_code, api_msg)
+        _status["last_hist_response"] = {
+            "http": hist.get("status"), "code": api_code, "msg": api_msg,
+            "data_preview": str(hist.get("data"))[:200] if hist.get("data") else None,
+        }
         if hist.get("status") == 200 and api_code == "00000":
             push_fn("history", hist["data"])
     except Exception as e:
