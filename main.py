@@ -27,6 +27,7 @@ def _push_data(kind: str, data):
     elif kind == "history":
         _mt5["history_raw"] = data
     elif kind == "copy_details":
+        _mt5["pushed_at"] = datetime.now(BKK).strftime("%H:%M")
         if isinstance(data, dict):
             changed = False
             # Search for any key that suggests account balance
@@ -485,7 +486,7 @@ async def get_widget():
             last = datetime.strptime(
                 datetime.now(BKK).strftime("%Y-%m-%d ") + pushed_at, "%Y-%m-%d %H:%M"
             ).replace(tzinfo=BKK)
-            stale = (datetime.now(BKK) - last).total_seconds() > 600  # stale after 10 min
+            stale = (datetime.now(BKK) - last).total_seconds() > 900  # stale after 15 min
         except Exception:
             stale = False
     return {
