@@ -433,29 +433,39 @@ async def get_poller_status():
 
 @app.get("/api/poller/test")
 async def test_poller_cookie():
-    """Make one live test call to Bitget and return what it says — useful for diagnosing cookie issues."""
-    from browser_poller import _load_cookie_string, BITGET_BASE, PORTFOLIO_ID, IMPERSONATE
+    """Run one full poll cycle and return diagnostic info."""
+    from browser_poller import _load_cookie_string, _parse_cookie_string, BITGET_BASE, PORTFOLIO_ID, CHROMIUM_ARGS
     cookie_str = _load_cookie_string()
     if not cookie_str:
         return {"ok": False, "error": "No cookie set"}
     try:
-        from curl_cffi.requests import AsyncSession
-        headers = {
-            "Cookie": cookie_str,
-            "Referer": f"{BITGET_BASE}/copy-trading/mt5/follower/detail?portfolioId={PORTFOLIO_ID}",
-            "Origin": BITGET_BASE,
-        }
-        async with AsyncSession(impersonate=IMPERSONATE) as s:
-            r = await s.post(
-                f"{BITGET_BASE}/v1/trace/mt5/data/tracePosition",
-                json={"portfolioId": PORTFOLIO_ID},
-                headers=headers,
+        from playwright.async_api import async_playwright
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=CHROMIUM_ARGS)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
             )
-        try:
-            body = r.json()
-        except Exception:
-            body = r.text[:500]
-        return {"http_status": r.status_code, "body": body}
+            cookies = _parse_cookie_string(cookie_str)
+            if cookies:
+                await context.add_cookies(cookies)
+            page = await context.new_page()
+            try:
+                await page.goto(f"{BITGET_BASE}/about", wait_until="domcontentloaded", timeout=30_000)
+            except Exception:
+                pass
+            await page.close()
+            r = await context.request.post(
+                f"{BITGET_BASE}/v1/trace/mt5/data/tracePosition",
+                data=json.dumps({"portfolioId": PORTFOLIO_ID}),
+                headers={"Content-Type": "application/json"},
+                timeout=20_000,
+            )
+            try:
+                body = await r.json()
+            except Exception:
+                body = (await r.text())[:500]
+            await browser.close()
+        return {"http_status": r.status, "body": body}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
