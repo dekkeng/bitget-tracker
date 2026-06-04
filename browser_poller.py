@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Callable
 
-import httpx
+from curl_cffi.requests import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -15,13 +15,7 @@ PORTFOLIO_ID = os.environ.get("PORTFOLIO_ID", "1443199880395776000")
 BITGET_BASE = "https://www.bitget.com"
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SEC", "120"))
 COOKIES_FILE = Path(os.environ.get("COOKIES_PATH", "cookies.json"))
-
-_BASE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Referer": f"https://www.bitget.com/copy-trading/mt5/follower/detail?portfolioId={PORTFOLIO_ID}",
-    "Origin": "https://www.bitget.com",
-    "Content-Type": "application/json",
-}
+IMPERSONATE = "chrome120"
 
 _status = {
     "running": False,
@@ -82,40 +76,42 @@ async def start_poller(push_fn: Callable):
 
 
 async def _poll_once(push_fn: Callable, cookie_str: str):
-    headers = {**_BASE_HEADERS, "Cookie": cookie_str}
-    async with httpx.AsyncClient(headers=headers, timeout=30.0, follow_redirects=True) as client:
+    headers = {
+        "Cookie": cookie_str,
+        "Referer": f"https://www.bitget.com/copy-trading/mt5/follower/detail?portfolioId={PORTFOLIO_ID}",
+        "Origin": "https://www.bitget.com",
+    }
+    async with AsyncSession(impersonate=IMPERSONATE) as s:
         _status["browser_alive"] = True
-        await _active_poll(client, push_fn)
-        await _fetch_balance(client, push_fn)
+        await _active_poll(s, headers, push_fn)
+        await _fetch_balance(s, headers, push_fn)
         logger.info("Poll cycle complete")
 
 
-async def _active_poll(client: httpx.AsyncClient, push_fn: Callable):
+async def _active_poll(s: AsyncSession, headers: dict, push_fn: Callable):
     logger.info("Polling APIs...")
 
     try:
-        r = await client.post(
+        r = await s.post(
             f"{BITGET_BASE}/v1/trace/mt5/data/tracePosition",
             json={"portfolioId": PORTFOLIO_ID},
+            headers=headers,
         )
+        logger.info("Positions: HTTP %s code=%s", r.status_code, _api_code(r))
         if r.status_code == 200:
             push_fn("positions", r.json())
-            logger.info("Polled positions OK")
-        else:
-            logger.warning("Positions API: HTTP %s", r.status_code)
     except Exception as e:
         logger.warning("Poll positions error: %s", e)
 
     try:
-        r = await client.post(
+        r = await s.post(
             f"{BITGET_BASE}/v1/trace/mt5/trace/positionHistory",
             json={"portfolioId": PORTFOLIO_ID, "pageNo": 1, "pageSize": 50},
+            headers=headers,
         )
+        logger.info("History: HTTP %s code=%s", r.status_code, _api_code(r))
         if r.status_code == 200:
             push_fn("history", r.json())
-            logger.info("Polled history OK")
-        else:
-            logger.warning("History API: HTTP %s", r.status_code)
     except Exception as e:
         logger.warning("Poll history error: %s", e)
 
@@ -125,9 +121,10 @@ async def _active_poll(client: httpx.AsyncClient, push_fn: Callable):
         "/v1/trace/mt5/trace/fundFlow",
     ]:
         try:
-            r = await client.post(
+            r = await s.post(
                 f"{BITGET_BASE}{ep}",
                 json={"portfolioId": PORTFOLIO_ID, "pageNo": 1, "pageSize": 100},
+                headers=headers,
             )
             if r.status_code != 200:
                 continue
@@ -146,7 +143,7 @@ async def _active_poll(client: httpx.AsyncClient, push_fn: Callable):
     _status["polls"] += 1
 
 
-async def _fetch_balance(client: httpx.AsyncClient, push_fn: Callable):
+async def _fetch_balance(s: AsyncSession, headers: dict, push_fn: Callable):
     get_eps = [
         f"/v1/trace/mt5/trace/traceDetail?portfolioId={PORTFOLIO_ID}",
         f"/v1/trace/mt5/data/copyDetail?portfolioId={PORTFOLIO_ID}",
@@ -158,9 +155,9 @@ async def _fetch_balance(client: httpx.AsyncClient, push_fn: Callable):
     ]
     for ep in get_eps:
         try:
-            r = await client.get(f"{BITGET_BASE}{ep}")
+            r = await s.get(f"{BITGET_BASE}{ep}", headers=headers)
             if r.status_code != 200:
-                logger.info("Balance GET %s → %s", ep.split("?")[0].split("/")[-1], r.status_code)
+                logger.info("Balance GET %s → HTTP %s", ep.split("?")[0].split("/")[-1], r.status_code)
                 continue
             result = r.json()
             d = result.get("data", result) if isinstance(result, dict) else result
@@ -173,7 +170,7 @@ async def _fetch_balance(client: httpx.AsyncClient, push_fn: Callable):
                     return
                 logger.info("Balance GET %s → keys: %s", ep.split("?")[0].split("/")[-1], list(d.keys())[:8])
         except Exception as e:
-            logger.warning("Balance GET error %s: %s", ep.split("?")[0].split("/")[-1], e)
+            logger.warning("Balance GET %s error: %s", ep.split("?")[0].split("/")[-1], e)
 
     post_eps = [
         "/v1/trace/mt5/trace/traceDetail",
@@ -185,9 +182,13 @@ async def _fetch_balance(client: httpx.AsyncClient, push_fn: Callable):
     ]
     for ep in post_eps:
         try:
-            r = await client.post(f"{BITGET_BASE}{ep}", json={"portfolioId": PORTFOLIO_ID})
+            r = await s.post(
+                f"{BITGET_BASE}{ep}",
+                json={"portfolioId": PORTFOLIO_ID},
+                headers=headers,
+            )
             if r.status_code != 200:
-                logger.info("Balance POST %s → %s", ep.split("/")[-1], r.status_code)
+                logger.info("Balance POST %s → HTTP %s", ep.split("/")[-1], r.status_code)
                 continue
             result = r.json()
             d = result.get("data", result) if isinstance(result, dict) else result
@@ -200,6 +201,13 @@ async def _fetch_balance(client: httpx.AsyncClient, push_fn: Callable):
                     return
                 logger.info("Balance POST %s → keys: %s", ep.split("/")[-1], list(d.keys())[:8])
         except Exception as e:
-            logger.warning("Balance POST error %s: %s", ep.split("/")[-1], e)
+            logger.warning("Balance POST %s error: %s", ep.split("/")[-1], e)
 
     logger.warning("No balance endpoint found")
+
+
+def _api_code(r) -> str:
+    try:
+        return r.json().get("code", "?")
+    except Exception:
+        return "?"
