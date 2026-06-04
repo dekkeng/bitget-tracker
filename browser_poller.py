@@ -169,9 +169,11 @@ async def _active_poll(page, push_fn: Callable):
         }""", PORTFOLIO_ID)
         api_code = (pos.get("data") or {}).get("code")
         api_msg  = (pos.get("data") or {}).get("msg")
-        logger.info("Positions: HTTP %s api_code=%s msg=%s", pos.get("status"), api_code, api_msg)
+        pos_err  = pos.get("error")
+        logger.info("Positions: HTTP %s api_code=%s msg=%s err=%s", pos.get("status"), api_code, api_msg, pos_err)
         _status["last_pos_response"] = {
             "http": pos.get("status"), "code": api_code, "msg": api_msg,
+            "error": pos_err,
             "data_preview": str(pos.get("data"))[:200] if pos.get("data") else None,
         }
         if pos.get("status") == 200 and api_code in ("00000", "200", "0"):
@@ -193,9 +195,11 @@ async def _active_poll(page, push_fn: Callable):
         }""", PORTFOLIO_ID)
         api_code = (hist.get("data") or {}).get("code")
         api_msg  = (hist.get("data") or {}).get("msg")
-        logger.info("History: HTTP %s api_code=%s msg=%s", hist.get("status"), api_code, api_msg)
+        hist_err = hist.get("error")
+        logger.info("History: HTTP %s api_code=%s msg=%s err=%s", hist.get("status"), api_code, api_msg, hist_err)
         _status["last_hist_response"] = {
             "http": hist.get("status"), "code": api_code, "msg": api_msg,
+            "error": hist_err,
             "data_preview": str(hist.get("data"))[:200] if hist.get("data") else None,
         }
         if hist.get("status") == 200 and api_code in ("00000", "200", "0"):
