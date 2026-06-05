@@ -178,7 +178,7 @@
 
 <div id="main-wrapper">
   <header>
-    <div class="logo">BITGET <span>· DKTrading</span></div>
+    <div class="logo">BITGET <span>· All Traders</span></div>
     <span id="last-updated">Waiting for data…</span>
   </header>
 
@@ -246,6 +246,12 @@
       <div id="tab-trades" class="tab-panel">
         <div id="trades-body"><div class="empty">Loading…</div></div>
       </div>
+    </div>
+
+    <!-- By Trader breakdown -->
+    <div id="traders-section" style="display:none;margin-top:4px">
+      <div style="margin:0 12px 8px;font-size:11px;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted)">By Trader</div>
+      <div id="traders-cards"></div>
     </div>
 
   </div><!-- /content -->
@@ -502,9 +508,63 @@
     }
   }
 
+  async function fetchTraders() {
+    try {
+      const traders = await fetch('/api/mt5/traders').then(r => r.json());
+      if (!traders || !traders.length) return;
+      const section = document.getElementById('traders-section');
+      const container = document.getElementById('traders-cards');
+      section.style.display = 'block';
+      container.innerHTML = traders.map(t => {
+        const hasData = t.has_data;
+        const balStr = hasData ? fmtBal(t.balance) : '—';
+        const atCls  = hasData ? colorClass(t.all_time_pnl) : '';
+        const atStr  = hasData ? fmt(t.all_time_pnl) : '—';
+        const dCls   = hasData ? colorClass(t.daily_pnl) : '';
+        const dStr   = hasData ? fmt(t.daily_pnl) : '—';
+        const oCls   = hasData ? colorClass(t.open_positions_pnl) : '';
+        const oStr   = hasData ? fmt(t.open_positions_pnl) : '—';
+        return `<div class="card" style="margin:0 12px 10px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+            <div style="font-weight:700;font-size:14px">${t.name}</div>
+            <div style="font-size:11px;color:var(--muted)">${t.pushed_at ? 'Updated ' + t.pushed_at : hasData ? '' : 'Waiting…'}</div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+            <div>
+              <div style="font-size:10px;text-transform:uppercase;color:var(--muted);margin-bottom:3px">Balance</div>
+              <div style="font-size:18px;font-weight:700">${balStr}</div>
+            </div>
+            <div>
+              <div style="font-size:10px;text-transform:uppercase;color:var(--muted);margin-bottom:3px">All-time PnL</div>
+              <div class="${atCls}" style="font-size:18px;font-weight:700">${atStr}</div>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+            <div>
+              <div style="font-size:10px;text-transform:uppercase;color:var(--muted);margin-bottom:3px">Daily</div>
+              <div class="${dCls}" style="font-weight:600">${dStr}</div>
+            </div>
+            <div>
+              <div style="font-size:10px;text-transform:uppercase;color:var(--muted);margin-bottom:3px">Open PnL</div>
+              <div class="${oCls}" style="font-weight:600">${oStr}</div>
+            </div>
+            <div>
+              <div style="font-size:10px;text-transform:uppercase;color:var(--muted);margin-bottom:3px">Invest</div>
+              <div style="font-weight:600">${hasData ? fmtBal(t.investment) : '—'}</div>
+            </div>
+          </div>
+        </div>`;
+      }).join('');
+    } catch(e) {
+      console.error('traders fetch failed', e);
+    }
+  }
+
   fetchData();
+  fetchTraders();
   setInterval(fetchData, 10_000);
-  document.getElementById('refresh-btn').addEventListener('click', fetchData);
+  setInterval(fetchTraders, 30_000);
+  document.getElementById('refresh-btn').addEventListener('click', () => { fetchData(); fetchTraders(); });
 
   // Tabs
   document.querySelectorAll('.tab-btn').forEach(btn => {

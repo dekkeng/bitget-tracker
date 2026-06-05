@@ -9,10 +9,29 @@ from typing import Callable
 logger = logging.getLogger(__name__)
 
 BKK = timezone(timedelta(hours=7))
-PORTFOLIO_ID = os.environ.get("PORTFOLIO_ID", "1443199880395776000")
 BITGET_BASE = "https://www.bitget.com"
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SEC", "120"))
 COOKIES_FILE = Path(os.environ.get("COOKIES_PATH", "cookies.json"))
+
+# Parse TRADERS env var: "DKTrading:1443199880395776000,XauKingScalp:1433276980578508800"
+_TRADERS_ENV = os.environ.get("TRADERS", "")
+if _TRADERS_ENV:
+    _TRADERS: dict[str, str] = {}
+    for _item in _TRADERS_ENV.split(","):
+        _item = _item.strip()
+        if ":" in _item:
+            _n, _p = _item.split(":", 1)
+            _TRADERS[_n.strip()] = _p.strip()
+else:
+    _TRADERS = {
+        os.environ.get("TRADER_NAME", "DKTrading"): os.environ.get("PORTFOLIO_ID", "1443199880395776000")
+    }
+
+# Reverse lookup: portfolioId → trader name
+_pid_to_name: dict[str, str] = {pid: name for name, pid in _TRADERS.items()}
+
+# Legacy single-ID alias (used in positions probe which is still global)
+PORTFOLIO_ID = next(iter(_TRADERS.values()), "")
 
 CHROMIUM_ARGS = [
     "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
@@ -46,6 +65,7 @@ def get_status() -> dict:
         "has_cookie": bool(cookie_str),
         "cookie_preview": (cookie_str[:40] + "...") if len(cookie_str) > 40 else cookie_str,
         "poll_interval_sec": POLL_INTERVAL,
+        "traders": list(_TRADERS.keys()),
     }
 
 
@@ -85,11 +105,10 @@ async def start_poller(push_fn: Callable):
         _status["last_error"] = "Playwright not installed"
         return
 
-    # Wrap push_fn to count successful pushes
-    def _counted_push(kind: str, data):
+    def _counted_push(kind: str, data, trader: str = None):
         _status["pushes"] += 1
-        logger.info("push_fn called: kind=%s pushes=%d", kind, _status["pushes"])
-        push_fn(kind, data)
+        logger.info("push_fn called: kind=%s trader=%s pushes=%d", kind, trader, _status["pushes"])
+        push_fn(kind, data, trader)
 
     while True:
         cookie_str = _load_cookie_string()
@@ -155,7 +174,7 @@ async def _poll_once(push_fn: Callable, cookie_str: str):
 async def _active_poll(page, push_fn: Callable):
     logger.info("Polling APIs via page.evaluate...")
 
-    # ── Positions — probe with varied bodies on the 403 endpoint ─────────────
+    # ── Positions — global probe (not trader-specific, still 403 in most cases) ──
     pos_probes = []
     for label, body in [
         ("empty",          {}),
@@ -190,105 +209,153 @@ async def _active_poll(page, push_fn: Callable):
     _status["last_pos_response"] = pos_probes[0] if pos_probes else {}
     _status["last_pos_probes"] = pos_probes
 
-    # ── History — confirmed: /trace/positionHistory ───────────────────────────
-    try:
-        hist = await page.evaluate("""async (pid) => {
-            try {
-                const r = await fetch('/v1/trace/mt5/trace/positionHistory', {
-                    method: 'POST', credentials: 'include',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({portfolioId: pid, pageNo: 1, pageSize: 50}),
-                });
-                const text = await r.text();
-                if (text.trimStart().startsWith('<')) return {status: r.status, error: 'html_redirect'};
-                const j = JSON.parse(text);
-                return {status: r.status, data: j};
-            } catch(e) { return {status: 0, error: String(e)}; }
-        }""", PORTFOLIO_ID)
-        api_code = (hist.get("data") or {}).get("code")
-        api_msg  = (hist.get("data") or {}).get("msg")
-        logger.info("History: HTTP %s api_code=%s err=%s", hist.get("status"), api_code, hist.get("error"))
-        _status["last_hist_response"] = {
-            "http": hist.get("status"), "code": api_code, "msg": api_msg,
-            "error": hist.get("error"),
-        }
-        if hist.get("status") == 200 and api_code in ("00000", "200", "0"):
-            push_fn("history", hist["data"])
-    except Exception as e:
-        logger.warning("Poll history error: %s", e)
+    # ── History + balance history — per trader ───────────────────────────────
+    for trader_name, pid in _TRADERS.items():
+        logger.info("Polling history for trader=%s pid=%s", trader_name, pid)
 
-    bh_probes = []
-    for ep in ["/v1/trace/mt5/trace/balanceHistory",
-               "/v1/trace/mt5/data/balanceHistory",
-               "/v1/trace/mt5/trace/fundFlow"]:
         try:
-            result = await page.evaluate("""async ([ep, pid]) => {
+            hist = await page.evaluate("""async (pid) => {
                 try {
-                    const r = await fetch(ep, {
+                    const r = await fetch('/v1/trace/mt5/trace/positionHistory', {
                         method: 'POST', credentials: 'include',
                         headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({portfolioId: pid, pageNo: 1, pageSize: 100}),
+                        body: JSON.stringify({portfolioId: pid, pageNo: 1, pageSize: 50}),
                     });
-                    const j = await r.json();
-                    if (!r.ok) return {status: r.status, code: j?.code};
-                    const rows = j?.data?.rows || j?.data?.list || j?.data || [];
-                    return {status: r.status, code: j?.code,
-                            rows: Array.isArray(rows) ? rows : null,
-                            sample: !Array.isArray(rows) && typeof j?.data === 'object'
-                                ? Object.keys(j?.data||{}).slice(0,6) : null};
+                    const text = await r.text();
+                    if (text.trimStart().startsWith('<')) return {status: r.status, error: 'html_redirect'};
+                    const j = JSON.parse(text);
+                    return {status: r.status, data: j};
                 } catch(e) { return {status: 0, error: String(e)}; }
-            }""", [ep, PORTFOLIO_ID])
-            bh_probes.append({"ep": ep.split("/")[-1], **result})
-            rows = result.get("rows") if isinstance(result, dict) else None
-            if rows:
-                logger.info("Polled balance_history from %s (%d rows)", ep, len(rows))
-                push_fn("balance_history", rows)
-                break
-        except Exception as ex:
-            bh_probes.append({"ep": ep.split("/")[-1], "error": str(ex)})
-    _status["last_bh_probes"] = bh_probes
+            }""", pid)
+            api_code = (hist.get("data") or {}).get("code")
+            api_msg  = (hist.get("data") or {}).get("msg")
+            logger.info("History[%s]: HTTP %s api_code=%s err=%s", trader_name, hist.get("status"), api_code, hist.get("error"))
+            _status["last_hist_response"] = {
+                "trader": trader_name, "http": hist.get("status"),
+                "code": api_code, "msg": api_msg, "error": hist.get("error"),
+            }
+            if hist.get("status") == 200 and api_code in ("00000", "200", "0"):
+                push_fn("history", hist["data"], trader_name)
+        except Exception as e:
+            logger.warning("Poll history error [%s]: %s", trader_name, e)
+
+        bh_probes = []
+        for ep in ["/v1/trace/mt5/trace/balanceHistory",
+                   "/v1/trace/mt5/data/balanceHistory",
+                   "/v1/trace/mt5/trace/fundFlow"]:
+            try:
+                result = await page.evaluate("""async ([ep, pid]) => {
+                    try {
+                        const r = await fetch(ep, {
+                            method: 'POST', credentials: 'include',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({portfolioId: pid, pageNo: 1, pageSize: 100}),
+                        });
+                        const j = await r.json();
+                        if (!r.ok) return {status: r.status, code: j?.code};
+                        const rows = j?.data?.rows || j?.data?.list || j?.data || [];
+                        return {status: r.status, code: j?.code,
+                                rows: Array.isArray(rows) ? rows : null,
+                                sample: !Array.isArray(rows) && typeof j?.data === 'object'
+                                    ? Object.keys(j?.data||{}).slice(0,6) : null};
+                    } catch(e) { return {status: 0, error: String(e)}; }
+                }""", [ep, pid])
+                bh_probes.append({"ep": ep.split("/")[-1], **result})
+                rows = result.get("rows") if isinstance(result, dict) else None
+                if rows:
+                    logger.info("Polled balance_history[%s] from %s (%d rows)", trader_name, ep, len(rows))
+                    push_fn("balance_history", rows, trader_name)
+                    break
+            except Exception as ex:
+                bh_probes.append({"ep": ep.split("/")[-1], "error": str(ex)})
+        _status["last_bh_probes"] = bh_probes
 
     _status["last_poll"] = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
     _status["polls"] += 1
 
 
 async def _fetch_balance(page, push_fn: Callable):
-    # getFollowPortfolios returns the follower's copy portfolio including balance,
-    # investment, equity and realizedPnl — confirmed via Proxyman capture.
+    # Try a single call without portfolioId — may return all followed portfolios at once.
+    # If it returns multiple portfolioDetails, match each to a trader by portfolioId.
+    # Fallback: per-trader calls.
     try:
-        result = await page.evaluate("""async (pid) => {
+        result = await page.evaluate("""async () => {
             try {
                 const r = await fetch('/v1/trace/mt5/trace/getFollowPortfolios', {
                     method: 'POST', credentials: 'include',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({portfolioId: pid}),
+                    body: JSON.stringify({}),
                 });
                 const j = await r.json();
                 return {status: r.status, code: j?.code, data: j?.data};
             } catch(e) { return {status: 0, error: String(e)}; }
-        }""", PORTFOLIO_ID)
+        }""")
 
         code = result.get("code") if isinstance(result, dict) else None
-        _status["last_balance_probes"] = {"getFollowPortfolios": {
+        _status["last_balance_probes"] = {"getFollowPortfolios_all": {
             "http": result.get("status"), "code": code}}
 
         if result.get("status") == 200 and code in ("00000", "200", "0"):
             data = result.get("data") or {}
             details = data.get("portfolioDetails") or []
-            if details and isinstance(details[0], dict):
-                portfolio = details[0]
-                logger.info("getFollowPortfolios OK: balance=%s investment=%s",
-                            portfolio.get("balance"), portfolio.get("totalInvestment"))
-                push_fn("copy_details", portfolio)
-                _status["last_scrape"] = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
-                _status["scrapes"] += 1
-                return
-            logger.warning("getFollowPortfolios: no portfolioDetails in response")
-        else:
-            logger.warning("getFollowPortfolios failed: http=%s code=%s",
-                           result.get("status"), code)
+            if details and isinstance(details, list):
+                matched = 0
+                for portfolio in details:
+                    if not isinstance(portfolio, dict):
+                        continue
+                    pid = str(portfolio.get("portfolioId") or portfolio.get("followPortfolioId") or "")
+                    trader_name = _pid_to_name.get(pid)
+                    if trader_name:
+                        logger.info("getFollowPortfolios all: matched trader=%s pid=%s balance=%s",
+                                    trader_name, pid, portfolio.get("balance"))
+                        push_fn("copy_details", portfolio, trader_name)
+                        matched += 1
+                    else:
+                        logger.info("getFollowPortfolios all: unmatched pid=%s keys=%s",
+                                    pid, list(portfolio.keys())[:6])
+                if matched > 0:
+                    _status["scrapes"] += 1
+                    _status["last_scrape"] = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
+                    return
+                logger.warning("getFollowPortfolios all: got %d details but none matched known pids %s",
+                               len(details), list(_pid_to_name.keys()))
     except Exception as e:
-        logger.warning("getFollowPortfolios error: %s", e)
-        _status["last_balance_probes"] = {"getFollowPortfolios": {"error": str(e)}}
+        logger.warning("getFollowPortfolios all error: %s", e)
 
-    logger.warning("Balance fetch failed")
+    # Fallback: per-trader calls
+    logger.info("Falling back to per-trader getFollowPortfolios calls")
+    for trader_name, pid in _TRADERS.items():
+        try:
+            result = await page.evaluate("""async (pid) => {
+                try {
+                    const r = await fetch('/v1/trace/mt5/trace/getFollowPortfolios', {
+                        method: 'POST', credentials: 'include',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({portfolioId: pid}),
+                    });
+                    const j = await r.json();
+                    return {status: r.status, code: j?.code, data: j?.data};
+                } catch(e) { return {status: 0, error: String(e)}; }
+            }""", pid)
+
+            code = result.get("code") if isinstance(result, dict) else None
+            _status["last_balance_probes"][f"getFollowPortfolios_{trader_name}"] = {
+                "http": result.get("status"), "code": code}
+
+            if result.get("status") == 200 and code in ("00000", "200", "0"):
+                data = result.get("data") or {}
+                details = data.get("portfolioDetails") or []
+                if details and isinstance(details[0], dict):
+                    portfolio = details[0]
+                    logger.info("getFollowPortfolios[%s]: balance=%s investment=%s",
+                                trader_name, portfolio.get("balance"), portfolio.get("totalInvestment"))
+                    push_fn("copy_details", portfolio, trader_name)
+                    _status["last_scrape"] = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
+                    _status["scrapes"] += 1
+                else:
+                    logger.warning("getFollowPortfolios[%s]: no portfolioDetails", trader_name)
+            else:
+                logger.warning("getFollowPortfolios[%s] failed: http=%s code=%s",
+                               trader_name, result.get("status"), code)
+        except Exception as e:
+            logger.warning("getFollowPortfolios[%s] error: %s", trader_name, e)

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,123 +18,28 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-def _push_data(kind: str, data):
-    """Shared push handler used by both HTTP endpoint and browser poller."""
-    global _settings
-    if kind == "positions":
-        _mt5["positions_raw"] = data
-        _mt5["pushed_at"] = datetime.now(BKK).strftime("%H:%M")
-    elif kind == "history":
-        _mt5["history_raw"] = data
-    elif kind == "copy_details":
-        _mt5["pushed_at"] = datetime.now(BKK).strftime("%H:%M")
-        if isinstance(data, dict):
-            changed = False
-            # Search for any key that suggests account balance
-            _BALANCE_PATS = ("balance", "equity", "totalbal", "totalequity",
-                             "totalasset", "accountval", "worth", "asset")
-            for key in list(data.keys()):
-                if any(pat in key.lower() for pat in _BALANCE_PATS):
-                    try:
-                        val = round(float(data[key]), 2)
-                        if val > 0:
-                            _settings["balance"] = val
-                            changed = True
-                            logger.info("Auto-updated balance=%.2f from key=%s", val, key)
-                            break
-                    except (TypeError, ValueError):
-                        pass
-            if not changed:
-                logger.info("copy_details keys (no balance found): %s", list(data.keys())[:10])
-            for key in ("estNetProfit", "est_net_profit", "netProfit", "totalProfit",
-                        "cumProfitLoss", "totalPL"):
-                if key in data:
-                    try:
-                        val = round(float(data[key]), 2)
-                        _settings["all_time_pnl"] = val
-                        changed = True
-                        break
-                    except (TypeError, ValueError):
-                        pass
-            for key in ("realizedPnl", "realized_pnl", "realPnl", "realizedPL",
-                        "realizedProfit", "closedPL"):
-                if key in data:
-                    try:
-                        _settings["realized_pnl"] = round(float(data[key]), 2)
-                        changed = True
-                    except (TypeError, ValueError):
-                        pass
-            for key in ("totalInvestment", "total_investment", "investment"):
-                if key in data:
-                    try:
-                        val = round(float(data[key]), 2)
-                        if val > 0:
-                            _settings["investment"] = val
-                            changed = True
-                            logger.info("Auto-updated investment=%.2f from key=%s", val, key)
-                    except (TypeError, ValueError):
-                        pass
-            if changed:
-                _save_settings(_settings)
-    elif kind == "balance_history":
-        rows = []
-        if isinstance(data, dict):
-            rows = data.get("rows") or data.get("list") or data.get("data") or []
-        elif isinstance(data, list):
-            rows = data
-        if rows:
-            _mt5["balance_history_raw"] = rows
-            inv = _calc_investment(rows)
-            _settings["investment"] = inv
-            _save_settings(_settings)
-            logger.info("Auto-updated investment=%.2f from %d rows", inv, len(rows))
-    elif kind == "balance":
-        _mt5["balance_raw"] = data
-    elif kind == "balance_sniff":
-        url = data.get("url", "") if isinstance(data, dict) else ""
-        if "balance_sniffs" not in _mt5:
-            _mt5["balance_sniffs"] = []
-        _mt5["balance_sniffs"].append(data)
-        _mt5["balance_sniffs"] = _mt5["balance_sniffs"][-20:]
-
-    try:
-        _rebuild_summary()
-    except Exception as e:
-        logger.error("_rebuild_summary failed: %s", e)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Restore cookie from env var if file was wiped by redeploy
-    env_cookie = os.environ.get("BITGET_COOKIE", "")
-    cookie_path = Path(os.environ.get("COOKIES_PATH", "cookies.json"))
-    if env_cookie and not cookie_path.exists():
-        cookie_path.write_text(json.dumps({
-            "cookie": env_cookie,
-            "updated": "from-env-var",
-        }))
-        logger.info("Restored cookie from BITGET_COOKIE env var (%d chars)", len(env_cookie))
-
-    from browser_poller import start_poller
-    task = asyncio.create_task(start_poller(_push_data))
-    yield
-    task.cancel()
-
-
-app = FastAPI(lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 BKK = timezone(timedelta(hours=7))
-
 SETTINGS_FILE = Path(os.environ.get("SETTINGS_PATH", "settings.json"))
+COOKIES_FILE = Path(os.environ.get("COOKIES_PATH", "cookies.json"))
+
+# Parse TRADERS env var: "DKTrading:1443199880395776000,XauKingScalp:1433276980578508800"
+_TRADERS_ENV = os.environ.get("TRADERS", "")
+if _TRADERS_ENV:
+    TRADER_IDS: dict[str, str] = {}
+    for _item in _TRADERS_ENV.split(","):
+        _item = _item.strip()
+        if ":" in _item:
+            _n, _p = _item.split(":", 1)
+            TRADER_IDS[_n.strip()] = _p.strip()
+else:
+    TRADER_IDS = {
+        os.environ.get("TRADER_NAME", "DKTrading"): os.environ.get("PORTFOLIO_ID", "1443199880395776000")
+    }
+
+_DEFAULT_TRADER = next(iter(TRADER_IDS), "DKTrading")
+
+_BALANCE_PATS = ("balance", "equity", "totalbal", "totalequity",
+                 "totalasset", "accountval", "worth", "asset")
 
 
 def _load_settings() -> dict:
@@ -145,6 +51,7 @@ def _load_settings() -> dict:
     return {
         "balance": float(os.environ.get("INIT_BALANCE", "0")),
         "investment": float(os.environ.get("INIT_INVESTMENT", "0")),
+        "traders": {},
     }
 
 
@@ -153,6 +60,43 @@ def _save_settings(s: dict) -> None:
 
 
 _settings = _load_settings()
+if "traders" not in _settings:
+    _settings["traders"] = {}
+
+
+# ── Per-trader in-memory cache ────────────────────────────────────────────────
+
+_traders_cache: dict[str, dict] = {}
+
+
+def _tc(name: str) -> dict:
+    if name not in _traders_cache:
+        _traders_cache[name] = {
+            "positions_raw": None,
+            "history_raw": None,
+            "summary": None,
+            "trades": None,
+            "history": None,
+            "pushed_at": None,
+        }
+    return _traders_cache[name]
+
+
+def _ts(name: str) -> dict:
+    return _settings["traders"].setdefault(name, {})
+
+
+# ── Global (aggregate) MT5 cache ─────────────────────────────────────────────
+
+_mt5: dict = {
+    "positions_raw": None,
+    "history_raw": None,
+    "balance_raw": None,
+    "summary": None,
+    "trades": None,
+    "history": None,
+    "pushed_at": None,
+}
 
 
 # ── Time helpers ──────────────────────────────────────────────────────────────
@@ -170,19 +114,6 @@ def _ms_to_bkk_datetime(ms: int) -> str:
 
 def _ms_to_bkk_date(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=BKK).strftime("%Y-%m-%d")
-
-
-# ── MT5 cache ─────────────────────────────────────────────────────────────────
-
-_mt5: dict = {
-    "positions_raw": None,
-    "history_raw": None,
-    "balance_raw": None,
-    "summary": None,
-    "trades": None,
-    "history": None,
-    "pushed_at": None,
-}
 
 
 # ── Parsers ───────────────────────────────────────────────────────────────────
@@ -212,7 +143,6 @@ def _extract_history_rows(raw: Any) -> list:
 
 
 def _parse_side(p: dict) -> str:
-    """Resolve position side from any of the known field variants."""
     raw = (p.get("side") or p.get("holdSide") or
            p.get("directionType") or p.get("orderType") or 0)
     if isinstance(raw, str):
@@ -221,7 +151,6 @@ def _parse_side(p: dict) -> str:
 
 
 def _fv(*keys, src: dict, default=0.0) -> float:
-    """Return the first non-None, non-empty value from src matching any key."""
     for k in keys:
         v = src.get(k)
         if v is not None and v != "":
@@ -260,7 +189,7 @@ def _parse_trades(raw: Any) -> list[dict]:
             ct_raw = (h.get("closeTime") or h.get("closedAt") or
                       h.get("closeTs") or h.get("ctime") or 0)
             ct = int(ct_raw)
-            if 0 < ct < 10_000_000_000:  # seconds → ms
+            if 0 < ct < 10_000_000_000:
                 ct *= 1000
             out.append({
                 "time": _ms_to_bkk_datetime(ct),
@@ -280,25 +209,7 @@ def _parse_trades(raw: Any) -> list[dict]:
     return out
 
 
-def _parse_balance(raw: Any) -> float:
-    """Extract total balance from /v1/trace/mt5/account/balance response."""
-    if not isinstance(raw, dict):
-        return 0.0
-    data = raw.get("data") or raw
-    if isinstance(data, dict):
-        for key in ("balance", "totalBalance", "total_balance", "equity", "totalEquity"):
-            val = data.get(key)
-            if val is not None:
-                try:
-                    return round(float(val), 2)
-                except (TypeError, ValueError):
-                    pass
-    return 0.0
-
-
 def _parse_history_chart(trades: list[dict]) -> list[dict]:
-    """Group closed trades by Bangkok date for the 30-day chart."""
-    from collections import defaultdict
     day_pnl: dict[str, float] = defaultdict(float)
     for t in trades:
         d = _ms_to_bkk_date(t["close_time_ms"]) if t["close_time_ms"] else None
@@ -312,42 +223,20 @@ def _parse_history_chart(trades: list[dict]) -> list[dict]:
     return result
 
 
-def _rebuild_summary() -> None:
-    positions = _parse_positions(_mt5["positions_raw"])
-    trades    = _parse_trades(_mt5["history_raw"])
-    history   = _parse_history_chart(trades)
+def _parse_balance(raw: Any) -> float:
+    if not isinstance(raw, dict):
+        return 0.0
+    data = raw.get("data") or raw
+    if isinstance(data, dict):
+        for key in ("balance", "totalBalance", "total_balance", "equity", "totalEquity"):
+            val = data.get(key)
+            if val is not None:
+                try:
+                    return round(float(val), 2)
+                except (TypeError, ValueError):
+                    pass
+    return 0.0
 
-    open_pnl = sum(p["unrealized_pnl"] for p in positions)
-
-    today_start_ms, today_end_ms = _bkk_today_range_ms()
-    daily_pnl = sum(
-        t["pnl"] for t in trades
-        if today_start_ms <= t["close_time_ms"] < today_end_ms
-    )
-    trades_pnl = sum(t["pnl"] for t in trades)
-    # Prefer scraped Realized PnL from Bitget page (accurate), fall back to trades sum
-    scraped_pnl = _settings.get("realized_pnl", 0.0)
-    all_time_pnl = scraped_pnl if scraped_pnl != 0.0 else trades_pnl
-
-    _mt5["summary"] = {
-        "daily_pnl": round(daily_pnl, 4),
-        "open_positions": len(positions),
-        "open_positions_pnl": round(open_pnl, 4),
-        "all_time_pnl": round(all_time_pnl, 4),
-        "total_balance": _settings.get("balance", 0.0),
-        "total_investment": _settings.get("investment", 0.0),
-        "pushed_at": _mt5["pushed_at"],
-    }
-    _mt5["trades"]  = trades
-    _mt5["history"] = history
-
-    logger.info(
-        "MT5 rebuilt: positions=%d daily_pnl=%.4f all_time=%.4f",
-        len(positions), daily_pnl, all_time_pnl,
-    )
-
-
-# ── Routes ────────────────────────────────────────────────────────────────────
 
 def _calc_investment(rows: list) -> float:
     total = 0.0
@@ -366,10 +255,217 @@ def _calc_investment(rows: list) -> float:
     return round(total, 2)
 
 
+# ── Push handler ──────────────────────────────────────────────────────────────
+
+def _push_data(kind: str, data, trader: str = None):
+    global _settings
+    if trader is None:
+        trader = _DEFAULT_TRADER
+
+    tc = _tc(trader)
+    ts = _ts(trader)
+
+    if kind == "positions":
+        # Positions are global (can't split by trader yet)
+        _mt5["positions_raw"] = data
+        _mt5["pushed_at"] = datetime.now(BKK).strftime("%H:%M")
+        tc["pushed_at"] = _mt5["pushed_at"]
+    elif kind == "history":
+        tc["history_raw"] = data
+    elif kind == "copy_details":
+        tc["pushed_at"] = datetime.now(BKK).strftime("%H:%M")
+        _mt5["pushed_at"] = tc["pushed_at"]
+        if isinstance(data, dict):
+            changed = False
+            for key in list(data.keys()):
+                if any(pat in key.lower() for pat in _BALANCE_PATS):
+                    try:
+                        val = round(float(data[key]), 2)
+                        if val > 0:
+                            ts["balance"] = val
+                            changed = True
+                            logger.info("Auto-updated balance[%s]=%.2f from key=%s", trader, val, key)
+                            break
+                    except (TypeError, ValueError):
+                        pass
+            if not changed:
+                logger.info("copy_details[%s] keys (no balance found): %s", trader, list(data.keys())[:10])
+            for key in ("estNetProfit", "est_net_profit", "netProfit", "totalProfit",
+                        "cumProfitLoss", "totalPL"):
+                if key in data:
+                    try:
+                        val = round(float(data[key]), 2)
+                        ts["all_time_pnl"] = val
+                        changed = True
+                        break
+                    except (TypeError, ValueError):
+                        pass
+            for key in ("realizedPnl", "realized_pnl", "realPnl", "realizedPL",
+                        "realizedProfit", "closedPL"):
+                if key in data:
+                    try:
+                        ts["realized_pnl"] = round(float(data[key]), 2)
+                        changed = True
+                    except (TypeError, ValueError):
+                        pass
+            for key in ("totalInvestment", "total_investment", "investment"):
+                if key in data:
+                    try:
+                        val = round(float(data[key]), 2)
+                        if val > 0:
+                            ts["investment"] = val
+                            changed = True
+                            logger.info("Auto-updated investment[%s]=%.2f from key=%s", trader, val, key)
+                    except (TypeError, ValueError):
+                        pass
+            # Open (floating) PnL from portfolio details
+            for key in ("floatProfit", "floatingProfit", "unrealizedPnl", "openPnl",
+                        "unrealizedPL", "upl", "floatPL"):
+                if key in data:
+                    try:
+                        ts["open_pnl"] = round(float(data[key]), 2)
+                    except (TypeError, ValueError):
+                        pass
+                    break
+            if changed:
+                _save_settings(_settings)
+    elif kind == "balance_history":
+        rows = []
+        if isinstance(data, dict):
+            rows = data.get("rows") or data.get("list") or data.get("data") or []
+        elif isinstance(data, list):
+            rows = data
+        if rows:
+            inv = _calc_investment(rows)
+            ts["investment"] = inv
+            _save_settings(_settings)
+            logger.info("Auto-updated investment[%s]=%.2f from %d rows", trader, inv, len(rows))
+    elif kind == "balance":
+        _mt5["balance_raw"] = data
+    elif kind == "balance_sniff":
+        if "balance_sniffs" not in _mt5:
+            _mt5["balance_sniffs"] = []
+        _mt5["balance_sniffs"].append(data)
+        _mt5["balance_sniffs"] = _mt5["balance_sniffs"][-20:]
+
+    try:
+        _rebuild_summary()
+    except Exception as e:
+        logger.error("_rebuild_summary failed: %s", e)
+
+
+# ── Summary builders ──────────────────────────────────────────────────────────
+
+def _rebuild_trader_summary(name: str) -> dict:
+    tc = _tc(name)
+    ts = _ts(name)
+
+    trades = _parse_trades(tc["history_raw"])
+    history = _parse_history_chart(trades)
+
+    today_start_ms, today_end_ms = _bkk_today_range_ms()
+    daily_pnl = sum(
+        t["pnl"] for t in trades
+        if today_start_ms <= t["close_time_ms"] < today_end_ms
+    )
+    trades_pnl = sum(t["pnl"] for t in trades)
+    scraped_pnl = ts.get("realized_pnl", 0.0)
+    all_time_pnl = scraped_pnl if scraped_pnl != 0.0 else trades_pnl
+
+    summary = {
+        "name": name,
+        "portfolio_id": TRADER_IDS.get(name, ""),
+        "balance": ts.get("balance", 0.0),
+        "investment": ts.get("investment", 0.0),
+        "daily_pnl": round(daily_pnl, 4),
+        "all_time_pnl": round(all_time_pnl, 4),
+        "open_positions_pnl": ts.get("open_pnl", 0.0),
+        "pushed_at": tc["pushed_at"],
+        "has_data": tc["history_raw"] is not None or ts.get("balance", 0) > 0,
+    }
+    tc["summary"] = summary
+    tc["trades"] = trades
+    tc["history"] = history
+    return summary
+
+
+def _rebuild_summary() -> None:
+    all_trades = []
+    total_balance = 0.0
+    total_investment = 0.0
+    total_daily_pnl = 0.0
+    total_all_time_pnl = 0.0
+    total_open_pnl = 0.0
+
+    for name in TRADER_IDS:
+        s = _rebuild_trader_summary(name)
+        all_trades.extend(_tc(name)["trades"] or [])
+        total_balance += s["balance"]
+        total_investment += s["investment"]
+        total_daily_pnl += s["daily_pnl"]
+        total_all_time_pnl += s["all_time_pnl"]
+        total_open_pnl += s["open_positions_pnl"]
+
+    # Open positions from the global probe (fallback: sum from portfolio details)
+    all_positions = _parse_positions(_mt5["positions_raw"])
+    if all_positions:
+        total_open_pnl = sum(p["unrealized_pnl"] for p in all_positions)
+
+    _mt5["summary"] = {
+        "daily_pnl": round(total_daily_pnl, 4),
+        "open_positions": len(all_positions),
+        "open_positions_pnl": round(total_open_pnl, 4),
+        "all_time_pnl": round(total_all_time_pnl, 4),
+        "total_balance": round(total_balance, 2),
+        "total_investment": round(total_investment, 2),
+        "pushed_at": _mt5["pushed_at"],
+    }
+    all_trades.sort(key=lambda t: t["close_time_ms"], reverse=True)
+    _mt5["trades"] = all_trades
+    _mt5["history"] = _parse_history_chart(all_trades)
+
+    logger.info(
+        "MT5 rebuilt: traders=%d daily_pnl=%.4f all_time=%.4f balance=%.2f",
+        len(TRADER_IDS), total_daily_pnl, total_all_time_pnl, total_balance,
+    )
+
+
+# ── Lifespan ──────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    env_cookie = os.environ.get("BITGET_COOKIE", "")
+    cookie_path = Path(os.environ.get("COOKIES_PATH", "cookies.json"))
+    if env_cookie and not cookie_path.exists():
+        cookie_path.write_text(json.dumps({
+            "cookie": env_cookie,
+            "updated": "from-env-var",
+        }))
+        logger.info("Restored cookie from BITGET_COOKIE env var (%d chars)", len(env_cookie))
+
+    from browser_poller import start_poller
+    task = asyncio.create_task(start_poller(_push_data))
+    yield
+    task.cancel()
+
+
+app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
 @app.post("/api/push/mt5")
 async def push_mt5(request: Request):
     body = await request.json()
-    _push_data(body.get("kind"), body.get("data"))
+    _push_data(body.get("kind"), body.get("data"), body.get("trader"))
     return {"ok": True}
 
 
@@ -378,6 +474,17 @@ async def get_mt5():
     if not _mt5["summary"]:
         return {"available": False}
     return {**_mt5["summary"], "available": True}
+
+
+@app.get("/api/mt5/traders")
+async def get_mt5_traders():
+    summaries = []
+    for name in TRADER_IDS:
+        tc = _tc(name)
+        if tc["summary"] is None:
+            _rebuild_trader_summary(name)
+        summaries.append(tc["summary"])
+    return summaries
 
 
 @app.get("/api/mt5/positions")
@@ -398,36 +505,33 @@ async def get_mt5_history():
 @app.get("/api/mt5/debug")
 async def get_mt5_debug():
     pos_raw = _mt5["positions_raw"]
-    hist_raw = _mt5["history_raw"]
+    traders_debug = {}
+    for name in TRADER_IDS:
+        tc = _tc(name)
+        hist_raw = tc["history_raw"]
+        extracted_hist = _extract_history_rows(hist_raw)
+        parsed_hist = _parse_trades(hist_raw)
+        traders_debug[name] = {
+            "history_raw_type": type(hist_raw).__name__,
+            "extracted_count": len(extracted_hist),
+            "parsed_count": len(parsed_hist),
+            "parsed_sample": parsed_hist[:3],
+            "settings": _ts(name),
+            "pushed_at": tc["pushed_at"],
+        }
     extracted_pos = _extract_positions(pos_raw)
-    extracted_hist = _extract_history_rows(hist_raw)
     parsed_pos = _parse_positions(pos_raw)
-    parsed_hist = _parse_trades(hist_raw)
     return {
         "positions": {
             "raw_type": type(pos_raw).__name__,
-            "raw_full": pos_raw if isinstance(pos_raw, dict) and not pos_raw.get("data") else None,
             "raw_keys": list(pos_raw.keys()) if isinstance(pos_raw, dict) else None,
             "api_code": pos_raw.get("code") if isinstance(pos_raw, dict) else None,
-            "api_msg": pos_raw.get("msg") if isinstance(pos_raw, dict) else None,
-            "data_type": type(pos_raw.get("data")).__name__ if isinstance(pos_raw, dict) else None,
             "extracted_count": len(extracted_pos),
-            "first_raw_item": extracted_pos[0] if extracted_pos else None,
             "parsed_count": len(parsed_pos),
             "parsed": parsed_pos,
         },
-        "history": {
-            "raw_type": type(hist_raw).__name__,
-            "raw_full": hist_raw if isinstance(hist_raw, dict) and not hist_raw.get("data") else None,
-            "raw_keys": list(hist_raw.keys()) if isinstance(hist_raw, dict) else None,
-            "api_code": hist_raw.get("code") if isinstance(hist_raw, dict) else None,
-            "api_msg": hist_raw.get("msg") if isinstance(hist_raw, dict) else None,
-            "extracted_count": len(extracted_hist),
-            "first_raw_item": extracted_hist[0] if extracted_hist else None,
-            "parsed_count": len(parsed_hist),
-            "parsed_sample": parsed_hist[:3],
-        },
-        "settings": _settings,
+        "traders": traders_debug,
+        "aggregate_settings": {k: v for k, v in _settings.items() if k != "traders"},
     }
 
 
@@ -440,7 +544,7 @@ async def get_sniffs():
 async def get_mt5_raw():
     return {
         "positions": _mt5["positions_raw"],
-        "history": _mt5["history_raw"],
+        "traders": {name: {"history": _tc(name)["history_raw"]} for name in TRADER_IDS},
         "balance": _mt5["balance_raw"],
     }
 
@@ -459,7 +563,7 @@ async def post_settings(request: Request):
     if "investment" in body:
         _settings["investment"] = round(float(body["investment"]), 2)
     _save_settings(_settings)
-    if _mt5["positions_raw"] is not None:
+    if any(_tc(n)["history_raw"] is not None for n in TRADER_IDS):
         _rebuild_summary()
     return _settings
 
@@ -486,7 +590,7 @@ async def get_widget():
             last = datetime.strptime(
                 datetime.now(BKK).strftime("%Y-%m-%d ") + pushed_at, "%Y-%m-%d %H:%M"
             ).replace(tzinfo=BKK)
-            stale = (datetime.now(BKK) - last).total_seconds() > 900  # stale after 15 min
+            stale = (datetime.now(BKK) - last).total_seconds() > 900
         except Exception:
             stale = False
     return {
@@ -495,17 +599,14 @@ async def get_widget():
         "open_positions": s["open_positions"],
         "open_positions_pnl": s["open_positions_pnl"],
         "all_time_pnl": s["all_time_pnl"],
-        "total_balance": _settings.get("balance", 0.0),
-        "total_investment": _settings.get("investment", 0.0),
+        "total_balance": s["total_balance"],
+        "total_investment": s["total_investment"],
         "updated_at": pushed_at or datetime.now(BKK).strftime("%H:%M"),
         "stale": stale,
     }
 
 
 # ── Browser poller endpoints ─────────────────────────────────────────────────
-
-COOKIES_FILE = Path(os.environ.get("COOKIES_PATH", "cookies.json"))
-
 
 @app.get("/api/poller")
 async def get_poller_status():
@@ -515,7 +616,6 @@ async def get_poller_status():
 
 @app.get("/api/poller/test")
 async def test_poller_cookie():
-    """Run one full poll cycle and return diagnostic info."""
     from browser_poller import _load_cookie_string, _parse_cookie_string, BITGET_BASE, PORTFOLIO_ID, CHROMIUM_ARGS
     cookie_str = _load_cookie_string()
     if not cookie_str:

@@ -6,7 +6,7 @@ services:
     envVars:
       - key: PORT
         value: "10000"
-      - key: PORTFOLIO_ID
-        value: "1443199880395776000"
+      - key: TRADERS
+        value: "DKTrading:1443199880395776000,XauKingScalp:1433276980578508800"
       - key: POLL_INTERVAL_SEC
-        value: "60"
+        value: "120"
