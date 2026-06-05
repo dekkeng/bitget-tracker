@@ -238,23 +238,6 @@ def _parse_balance(raw: Any) -> float:
     return 0.0
 
 
-def _calc_investment(rows: list) -> float:
-    total = 0.0
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        typ = str(r.get("type") or r.get("typeName") or "").lower()
-        try:
-            amt = abs(float(r.get("amount") or r.get("changeAmount") or 0))
-        except (TypeError, ValueError):
-            continue
-        if "add" in typ or "deposit" in typ or "transfer in" in typ:
-            total += amt
-        elif "transfer out" in typ or "withdraw" in typ:
-            total -= amt
-    return round(total, 2)
-
-
 # ── Push handler ──────────────────────────────────────────────────────────────
 
 def _push_data(kind: str, data, trader: str = None):
@@ -329,17 +312,6 @@ def _push_data(kind: str, data, trader: str = None):
                     break
             if changed:
                 _save_settings(_settings)
-    elif kind == "balance_history":
-        rows = []
-        if isinstance(data, dict):
-            rows = data.get("rows") or data.get("list") or data.get("data") or []
-        elif isinstance(data, list):
-            rows = data
-        if rows:
-            inv = _calc_investment(rows)
-            ts["investment"] = inv
-            _save_settings(_settings)
-            logger.info("Auto-updated investment[%s]=%.2f from %d rows", trader, inv, len(rows))
     elif kind == "balance":
         _mt5["balance_raw"] = data
     elif kind == "balance_sniff":

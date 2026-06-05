@@ -239,37 +239,6 @@ async def _active_poll(page, push_fn: Callable):
         except Exception as e:
             logger.warning("Poll history error [%s]: %s", trader_name, e)
 
-        bh_probes = []
-        for ep in ["/v1/trace/mt5/trace/balanceHistory",
-                   "/v1/trace/mt5/data/balanceHistory",
-                   "/v1/trace/mt5/trace/fundFlow"]:
-            try:
-                result = await page.evaluate("""async ([ep, pid]) => {
-                    try {
-                        const r = await fetch(ep, {
-                            method: 'POST', credentials: 'include',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({portfolioId: pid, pageNo: 1, pageSize: 100}),
-                        });
-                        const j = await r.json();
-                        if (!r.ok) return {status: r.status, code: j?.code};
-                        const rows = j?.data?.rows || j?.data?.list || j?.data || [];
-                        return {status: r.status, code: j?.code,
-                                rows: Array.isArray(rows) ? rows : null,
-                                sample: !Array.isArray(rows) && typeof j?.data === 'object'
-                                    ? Object.keys(j?.data||{}).slice(0,6) : null};
-                    } catch(e) { return {status: 0, error: String(e)}; }
-                }""", [ep, pid])
-                bh_probes.append({"ep": ep.split("/")[-1], **result})
-                rows = result.get("rows") if isinstance(result, dict) else None
-                if rows:
-                    logger.info("Polled balance_history[%s] from %s (%d rows)", trader_name, ep, len(rows))
-                    push_fn("balance_history", rows, trader_name)
-                    break
-            except Exception as ex:
-                bh_probes.append({"ep": ep.split("/")[-1], "error": str(ex)})
-        _status["last_bh_probes"] = bh_probes
-
     _status["last_poll"] = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
     _status["polls"] += 1
 
