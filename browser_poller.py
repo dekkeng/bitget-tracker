@@ -53,6 +53,7 @@ _status = {
     "polls": 0,
     "scrapes": 0,
     "pushes": 0,
+    "auth_ok": None,   # None=unknown, True=working, False=cookie expired/CF blocked
     "last_pos_response": None,
     "last_hist_response": None,
 }
@@ -235,7 +236,10 @@ async def _active_poll(page, push_fn: Callable):
                 "code": api_code, "msg": api_msg, "error": hist.get("error"),
             }
             if hist.get("status") == 200 and api_code in ("00000", "200", "0"):
+                _status["auth_ok"] = True
                 push_fn("history", hist["data"], trader_name)
+            elif hist.get("error") == "html_redirect":
+                _status["auth_ok"] = False
         except Exception as e:
             logger.warning("Poll history error [%s]: %s", trader_name, e)
 
@@ -266,7 +270,11 @@ async def _fetch_balance(page, push_fn: Callable):
         _status["last_balance_probes"] = {"getFollowPortfolios_all": {
             "http": result.get("status"), "code": code}}
 
-        if result.get("status") == 200 and code in ("00000", "200", "0"):
+        if result.get("error") == "html_redirect":
+            _status["auth_ok"] = False
+            logger.warning("getFollowPortfolios all: html_redirect — cookie expired or CF blocked")
+        elif result.get("status") == 200 and code in ("00000", "200", "0"):
+            _status["auth_ok"] = True
             data = result.get("data") or {}
             details = data.get("portfolioDetails") or []
             if details and isinstance(details, list):
@@ -315,7 +323,10 @@ async def _fetch_balance(page, push_fn: Callable):
             _status["last_balance_probes"][f"getFollowPortfolios_{trader_name}"] = {
                 "http": result.get("status"), "code": code}
 
-            if result.get("status") == 200 and code in ("00000", "200", "0"):
+            if result.get("error") == "html_redirect":
+                _status["auth_ok"] = False
+            elif result.get("status") == 200 and code in ("00000", "200", "0"):
+                _status["auth_ok"] = True
                 data = result.get("data") or {}
                 details = data.get("portfolioDetails") or []
                 if details and isinstance(details[0], dict):

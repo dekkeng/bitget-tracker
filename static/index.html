@@ -182,6 +182,17 @@
     <span id="last-updated">Waiting for data…</span>
   </header>
 
+  <!-- Cookie expired warning -->
+  <div id="cookie-expired-banner" style="display:none;margin:0 12px 10px;padding:12px 14px;background:rgba(255,77,77,0.1);border:1px solid rgba(255,77,77,0.35);border-radius:10px;cursor:pointer" onclick="openCookieModal()">
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:18px">⚠️</span>
+      <div>
+        <div style="font-weight:600;color:var(--red);font-size:13px">Cookie expired — data is stale</div>
+        <div style="color:var(--muted);font-size:11px;margin-top:2px">Bitget is blocking the poller. Tap to paste a fresh cookie.</div>
+      </div>
+    </div>
+  </div>
+
   <!-- Waiting message shown until first push -->
   <div id="waiting-msg">
     <strong>Waiting for data</strong>
@@ -700,11 +711,20 @@
       const dot = document.getElementById('poller-dot');
       const text = document.getElementById('poller-text');
       const last = document.getElementById('poller-last');
+      const expiredBanner = document.getElementById('cookie-expired-banner');
+
+      // Cookie expired = has a cookie, polled at least once, but auth_ok is explicitly false
+      const cookieExpired = s.has_cookie && s.polls > 0 && s.auth_ok === false;
+      expiredBanner.style.display = cookieExpired ? 'block' : 'none';
 
       if (!s.has_cookie) {
         dot.style.background = 'var(--amber)';
         text.textContent = 'Poller: no cookie set';
         last.textContent = 'tap to set up';
+      } else if (cookieExpired) {
+        dot.style.background = 'var(--red)';
+        text.textContent = 'Poller: cookie expired';
+        last.textContent = 'tap to refresh';
       } else if (s.last_error) {
         dot.style.background = 'var(--red)';
         text.textContent = 'Poller: error — ' + s.last_error.slice(0, 40);
