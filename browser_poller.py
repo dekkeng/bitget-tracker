@@ -321,9 +321,11 @@ async def _poll_futures_history(page, push_fn: Callable, trader_name: str, pid: 
                 continue
             if result.get("status") == 200 and code in ("00000", "200", "0"):
                 _status["auth_ok"] = True
-                push_fn("history", result["data"], trader_name)
-                _status[f"futures_hist_{trader_name}"] = results
-                return
+                data = result.get("data")
+                if data:  # only stop probing if we actually got data
+                    push_fn("history", data, trader_name)
+                    _status[f"futures_hist_{trader_name}"] = results
+                    return
         except Exception as e:
             ep_short = ep.split("/")[-1]
             logger.warning("Futures history[%s] %s error: %s", trader_name, ep_short, e)
@@ -458,19 +460,25 @@ async def _fetch_futures_balance(page, push_fn: Callable, trader_name: str, pid:
             if result.get("status") == 200 and code in ("00000", "200", "0"):
                 _status["auth_ok"] = True
                 data = result.get("data") or {}
-                details = data.get("portfolioDetails")
+                details = data.get("portfolioDetails") if isinstance(data, dict) else None
                 if isinstance(details, list) and details:
                     push_fn("copy_details", details[0], trader_name)
+                    _status["scrapes"] += 1
+                    _status["last_scrape"] = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
+                    _status[f"futures_balance_{trader_name}"] = results
+                    break  # found data, stop probing
                 elif isinstance(data, dict) and data:
                     push_fn("copy_details", data, trader_name)
-                _status["scrapes"] += 1
-                _status["last_scrape"] = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
-                _status[f"futures_balance_{trader_name}"] = results
-                return
+                    _status["scrapes"] += 1
+                    _status["last_scrape"] = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
+                    _status[f"futures_balance_{trader_name}"] = results
+                    break  # found data, stop probing
+                # data was empty — continue to next probe
         except Exception as e:
             ep_short = ep.split("/")[-1]
             results.append({"ep": ep_short, "error": str(e)})
-    _status[f"futures_balance_{trader_name}"] = results
+    else:
+        _status[f"futures_balance_{trader_name}"] = results
 
     # Always fetch fund flow to compute net investment from transfer history
     await _fetch_futures_fund_flow(page, push_fn, trader_name, pid)
