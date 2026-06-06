@@ -471,3 +471,52 @@ async def _fetch_futures_balance(page, push_fn: Callable, trader_name: str, pid:
             ep_short = ep.split("/")[-1]
             results.append({"ep": ep_short, "error": str(e)})
     _status[f"futures_balance_{trader_name}"] = results
+
+    # Always fetch fund flow to compute net investment from transfer history
+    await _fetch_futures_fund_flow(page, push_fn, trader_name, pid)
+
+
+async def _fetch_futures_fund_flow(page, push_fn: Callable, trader_name: str, pid: str):
+    """Fetch /v1/trigger/uta/trace/getBalanceHistory to compute net investment.
+    transferType 0 = deposit into copy trading (+), 1 = withdrawal from copy trading (-).
+    Net investment = sum(type-0) - sum(type-1).
+    """
+    try:
+        result = await page.evaluate("""async (pid) => {
+            try {
+                // Try with portfolioId filter first, then account-wide
+                for (const body of [
+                    {portfolioId: pid, pageNo: 1, pageSize: 100},
+                    {pageNo: 1, pageSize: 100}
+                ]) {
+                    const r = await fetch('/v1/trigger/uta/trace/getBalanceHistory', {
+                        method: 'POST', credentials: 'include',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(body),
+                    });
+                    const text = await r.text();
+                    if (text.trimStart().startsWith('<')) return {status: r.status, error: 'html_redirect'};
+                    const j = JSON.parse(text);
+                    const rows = j?.data?.rows || [];
+                    if (r.ok && ['200','00000','0'].includes(j?.code) && rows.length > 0)
+                        return {status: r.status, code: j?.code, rows};
+                    if (!r.ok) return {status: r.status, code: j?.code, rows: []};
+                }
+                return {status: 0, rows: []};
+            } catch(e) { return {status: 0, error: String(e)}; }
+        }""", pid)
+
+        code = result.get("code") if isinstance(result, dict) else None
+        rows = result.get("rows") or []
+        logger.info("Futures fund_flow[%s]: HTTP %s code=%s rows=%d err=%s",
+                    trader_name, result.get("status"), code, len(rows), result.get("error"))
+        _status[f"futures_fund_flow_{trader_name}"] = {
+            "http": result.get("status"), "code": code,
+            "rows": len(rows), "error": result.get("error"),
+        }
+        if rows:
+            push_fn("fund_flow", rows, trader_name)
+        elif result.get("error") == "html_redirect":
+            _status["auth_ok"] = False
+    except Exception as e:
+        logger.warning("Futures fund_flow[%s] error: %s", trader_name, e)

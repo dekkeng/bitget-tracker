@@ -260,6 +260,27 @@ def _parse_trades(raw: Any) -> list[dict]:
     return out
 
 
+def _calc_futures_investment(rows: list) -> float:
+    """Compute net investment from /v1/trigger/uta/trace/getBalanceHistory rows.
+    transferType 0 = deposit into copy trading (+).
+    transferType 1 = withdrawal from copy trading (-).
+    """
+    total = 0.0
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        try:
+            amount = abs(float(r.get("transferAmount", 0)))
+        except (TypeError, ValueError):
+            continue
+        ttype = r.get("transferType", -1)
+        if ttype == 0:
+            total += amount
+        elif ttype == 1:
+            total -= amount
+    return round(total, 2)
+
+
 def _parse_history_chart(trades: list[dict]) -> list[dict]:
     day_pnl: dict[str, float] = defaultdict(float)
     for t in trades:
@@ -363,6 +384,16 @@ def _push_data(kind: str, data, trader: str = None):
                     break
             if changed:
                 _save_settings(_settings)
+    elif kind == "fund_flow":
+        # Futures copy trading transfer history — compute net investment
+        rows = data if isinstance(data, list) else []
+        if rows:
+            inv = _calc_futures_investment(rows)
+            if inv > 0:
+                ts["investment"] = inv
+                _save_settings(_settings)
+                logger.info("Auto-updated investment[%s]=%.2f from fund_flow (%d rows)",
+                            trader, inv, len(rows))
     elif kind == "balance":
         _mt5["balance_raw"] = data
     elif kind == "balance_sniff":
