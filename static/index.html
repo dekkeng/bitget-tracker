@@ -7,169 +7,334 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Bitget" />
-  <meta name="theme-color" content="#0d0d0d" />
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230d0d0d'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='Arial,sans-serif' font-weight='bold' font-size='20' fill='%2300c47a'%3EB%3C/text%3E%3C/svg%3E" />
+  <meta name="theme-color" content="#080a08" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23080a08'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='Arial,sans-serif' font-weight='bold' font-size='20' fill='%2300c47a'%3EB%3C/text%3E%3C/svg%3E" />
 
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
     :root {
-      --bg: #0d0d0d; --card: #1a1a1a; --border: #2a2a2a;
-      --text: #f0f0f0; --muted: #666;
-      --green: #00c47a; --red: #ff4d4d; --amber: #f59e0b;
-    }
-    html, body {
-      background: var(--bg); color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      min-height: 100dvh; overscroll-behavior-y: none;
+      --bg:           #080a08;
+      --surface:      #0f120f;
+      --border:       #1c201c;
+      --border-hi:    #2c332c;
+      --text:         #dde8dd;
+      --muted:        #4a5e4a;
+      --green:        #00c47a;
+      --red:          #e84040;
+      --amber:        #d4880a;
+      --mono:         'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+      --sans:         -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }
 
+    html, body {
+      background: var(--bg); color: var(--text);
+      font-family: var(--sans);
+      min-height: 100dvh; overscroll-behavior-y: none;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Pull-to-refresh ──────────────────────────────────────── */
     #ptr-indicator {
       position: fixed; top: 0; left: 0; right: 0; z-index: 100;
       display: flex; align-items: center; justify-content: center;
-      height: 48px; font-size: 13px; color: var(--muted);
+      height: 48px; font-size: 11px; color: var(--muted);
       pointer-events: none; opacity: 0; transition: opacity 0.2s;
     }
     #ptr-indicator.visible { opacity: 1; }
+    #main-wrapper { transition: transform 0.1s; padding-bottom: 80px; }
 
-    #main-wrapper { transition: transform 0.1s; padding-bottom: 100px; }
-
+    /* ── Header ───────────────────────────────────────────────── */
     header {
       display: flex; align-items: center; justify-content: space-between;
-      padding: 20px 16px 12px;
-      padding-top: max(20px, env(safe-area-inset-top));
+      padding: 14px 16px 14px;
+      padding-top: max(14px, env(safe-area-inset-top));
+      border-bottom: 1px solid var(--border);
     }
-    .logo { font-size: 15px; font-weight: 700; letter-spacing: 0.5px; color: var(--green); }
-    .logo span { color: var(--muted); font-weight: 400; }
-    #last-updated { font-size: 12px; color: var(--muted); transition: color 0.3s; }
+    .logo {
+      font-size: 12px; font-weight: 700; letter-spacing: 2px;
+      color: var(--text); text-transform: uppercase; font-family: var(--sans);
+    }
+    .logo span { color: var(--muted); font-weight: 400; letter-spacing: 0.5px; }
+    .header-right { display: flex; align-items: center; gap: 8px; }
+    #status-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--muted); flex-shrink: 0; transition: background 0.4s;
+      cursor: pointer;
+    }
+    #status-dot.ok   { background: var(--green); }
+    #status-dot.err  { background: var(--red); }
+    #status-dot.warn { background: var(--amber); }
+    #last-updated {
+      font-size: 11px; color: var(--muted);
+      font-family: var(--mono); cursor: default;
+    }
     #last-updated.stale { color: var(--amber); }
 
-    /* Waiting state */
-    #waiting-msg {
-      text-align: center; padding: 60px 24px;
-      color: var(--muted); font-size: 14px; line-height: 1.6;
+    /* ── Cookie expired banner ────────────────────────────────── */
+    #cookie-expired-banner {
+      display: none; padding: 10px 16px; cursor: pointer;
+      background: rgba(232,64,64,0.07);
+      border-bottom: 1px solid rgba(232,64,64,0.2);
     }
-    #waiting-msg strong { color: var(--text); display: block; margin-bottom: 8px; font-size: 16px; }
+    .banner-title { font-weight: 600; color: var(--red); font-size: 12px; }
+    .banner-sub   { color: var(--muted); font-size: 11px; margin-top: 1px; }
 
-    .card {
-      background: var(--card); border: 1px solid var(--border);
-      border-radius: 14px; padding: 16px; margin: 0 12px 12px;
+    /* ── Waiting state ────────────────────────────────────────── */
+    #waiting-msg {
+      padding: 64px 24px; text-align: center;
+      color: var(--muted); font-size: 13px; line-height: 1.7;
     }
-    .card-label {
-      font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px;
+    #waiting-msg strong {
+      color: var(--text); display: block; margin-bottom: 6px; font-size: 15px;
+    }
+    .btn-outline {
+      margin-top: 18px; padding: 10px 24px;
+      border-radius: 8px; border: 1px solid var(--green);
+      background: none; color: var(--green);
+      font-weight: 600; font-size: 13px; cursor: pointer;
+      font-family: var(--sans); letter-spacing: 0.3px;
+    }
+
+    /* ── Flat sections ────────────────────────────────────────── */
+    .section { padding: 20px 16px; border-bottom: 1px solid var(--border); }
+    .section-label {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px;
+      color: var(--muted); margin-bottom: 12px; font-family: var(--sans);
+    }
+
+    /* ── Balance section ──────────────────────────────────────── */
+    .bal-primary { display: flex; align-items: baseline; gap: 8px; margin-bottom: 14px; }
+    #total-balance {
+      font-family: var(--mono); font-size: 38px; font-weight: 700;
+      line-height: 1; letter-spacing: -1.5px; cursor: pointer;
+    }
+    .bal-currency { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+    .bal-sub { display: flex; gap: 24px; }
+    .bal-sub-item {}
+    .bal-sub-label {
+      font-size: 10px; color: var(--muted); text-transform: uppercase;
+      letter-spacing: 0.8px; margin-bottom: 3px;
+    }
+    #total-investment {
+      font-family: var(--mono); font-size: 13px; color: var(--text); cursor: pointer;
+    }
+    #return-pct { font-family: var(--mono); font-size: 13px; }
+
+    /* ── Daily PnL — the one accent element ───────────────────── */
+    .daily-section {
+      padding: 20px 16px 20px 13px;
+      border-bottom: 1px solid var(--border);
+      border-left: 3px solid var(--green);
+      transition: border-left-color 0.3s;
+    }
+    .daily-section.neg { border-left-color: var(--red); }
+    #daily-pnl {
+      font-family: var(--mono); font-size: 48px; font-weight: 700;
+      line-height: 1; letter-spacing: -2.5px; margin-bottom: 5px;
+    }
+    #daily-sub { font-size: 12px; color: var(--muted); }
+
+    /* ── Trend badges — blocks.so style ──────────────────────── */
+    .trend-badge {
+      display: inline-flex; align-items: center; gap: 3px;
+      padding: 2px 8px; border-radius: 999px;
+      font-size: 10px; font-weight: 600; letter-spacing: 0.2px;
+      font-family: var(--sans);
+    }
+    .trend-badge.up   { background: rgba(0,196,122,0.12); color: var(--green); }
+    .trend-badge.down { background: rgba(232,64,64,0.12);  color: var(--red); }
+    .trend-badge.flat { background: rgba(74,94,74,0.15);   color: var(--muted); }
+
+    /* ── Stats cards — blocks.so bordered card grid ───────────── */
+    .stats-cards {
+      display: grid; grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px; padding: 12px; border-bottom: 1px solid var(--border);
+    }
+    .stat-card {
+      background: var(--surface); border: 1px solid var(--border-hi);
+      border-radius: 10px; padding: 12px;
+    }
+    .stat-label {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px;
       color: var(--muted); margin-bottom: 8px;
     }
+    .stat-val { font-family: var(--mono); font-size: 18px; font-weight: 600; line-height: 1; margin-bottom: 7px; }
 
-    /* Balance bar */
-    .balance-bar {
-      display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 0 12px 12px;
-    }
-    .balance-card {
-      background: var(--card); border: 1px solid var(--border);
-      border-radius: 14px; padding: 14px 12px; cursor: pointer;
-      transition: border-color 0.2s;
-    }
-    .balance-card:active { border-color: var(--green); }
-    .balance-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 6px; }
-    .balance-val { font-size: 22px; font-weight: 700; line-height: 1; }
+    /* ── Balance progress bar — blocks.so stats-11 style ─────── */
+    .bal-progress { height: 2px; background: var(--border-hi); border-radius: 1px; margin-top: 14px; overflow: hidden; }
+    .bal-progress-fill { height: 100%; background: var(--green); border-radius: 1px; max-width: 100%; transition: width 0.5s ease; }
+    .bal-progress-fill.loss { background: var(--red); }
 
-    /* Hero PnL */
-    .hero-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin: 0 12px 12px; }
-    .hero-card {
-      background: var(--card); border: 1px solid var(--border);
-      border-radius: 14px; padding: 14px 12px;
+    /* ── Chart section ────────────────────────────────────────── */
+    .chart-section {
+      padding: 16px 16px 0;
+      border-bottom: 1px solid var(--border);
     }
-    .hero-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 6px; }
-    .hero-val { font-size: 20px; font-weight: 700; line-height: 1; }
+    #chart-canvas { width: 100%; height: 160px; display: block; }
 
-    /* Settings modal */
-    .modal-overlay {
-      position: fixed; inset: 0; background: rgba(0,0,0,0.7);
-      display: none; align-items: center; justify-content: center; z-index: 500;
+    /* ── Tabs ─────────────────────────────────────────────────── */
+    .tab-section { border-bottom: 1px solid var(--border); }
+    .tab-bar { display: flex; padding: 0 16px; border-bottom: 1px solid var(--border); }
+    .tab-btn {
+      background: none; border: none; color: var(--muted);
+      font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px;
+      padding: 12px 0; margin-right: 20px; cursor: pointer;
+      border-bottom: 2px solid transparent; font-family: var(--sans);
+      transition: color 0.15s, border-color 0.15s;
     }
-    .modal-overlay.active { display: flex; }
-    .modal-box {
-      background: var(--card); border: 1px solid var(--border);
-      border-radius: 16px; padding: 24px 20px; width: min(340px, 90vw);
-    }
-    .modal-title { font-size: 16px; font-weight: 700; margin-bottom: 16px; }
-    .modal-field { margin-bottom: 14px; }
-    .modal-field label { display: block; font-size: 11px; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; letter-spacing: 0.5px; }
-    .modal-field input {
-      width: 100%; background: var(--bg); border: 1px solid var(--border);
-      border-radius: 8px; padding: 10px 12px; color: var(--text); font-size: 16px;
-      outline: none;
-    }
-    .modal-field input:focus { border-color: var(--green); }
-    .modal-actions { display: flex; gap: 10px; margin-top: 18px; }
-    .modal-actions button {
-      flex: 1; padding: 10px; border-radius: 8px; border: none; font-size: 14px;
-      font-weight: 600; cursor: pointer;
-    }
-    .btn-cancel { background: var(--border); color: var(--text); }
-    .btn-save { background: var(--green); color: #000; }
+    .tab-btn.active { color: var(--text); border-bottom-color: var(--green); }
+    .tab-panel { display: none; padding: 0 16px 16px; }
+    .tab-panel.active { display: block; }
 
-    .big-pnl { font-size: 36px; font-weight: 700; line-height: 1; margin-bottom: 6px; }
-    .big-sub  { font-size: 14px; }
+    /* ── Tables ───────────────────────────────────────────────── */
+    .data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .data-table th {
+      text-align: left; color: var(--muted); font-weight: 500;
+      padding: 12px 0 8px; font-size: 10px;
+      text-transform: uppercase; letter-spacing: 0.8px;
+    }
+    .data-table td {
+      padding: 10px 4px 10px 0;
+      border-top: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    .data-table td.mono { font-family: var(--mono); font-size: 12px; }
+    .side-badge {
+      display: inline-block; padding: 1px 5px; border-radius: 3px;
+      font-size: 9px; font-weight: 600; letter-spacing: 0.8px;
+    }
+    .side-badge.long  { background: rgba(0,196,122,0.10); color: var(--green); }
+    .side-badge.short { background: rgba(232,64,64,0.10);  color: var(--red); }
+    .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 20px 0; }
 
+    /* ── Traders section — compact list ──────────────────────── */
+    #traders-section { border-bottom: 1px solid var(--border); }
+    .traders-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 16px 0;
+    }
+    .traders-header .section-label { margin-bottom: 0; }
+    .manage-btn {
+      font-size: 10px; color: var(--green); background: none; border: none;
+      cursor: pointer; font-family: var(--sans); font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.8px;
+    }
+    .trader-row {
+      display: grid; grid-template-columns: 1fr auto;
+      padding: 14px 16px; border-top: 1px solid var(--border);
+      gap: 12px; align-items: start;
+    }
+    .trader-row:first-child { margin-top: 10px; }
+    .trader-name-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .trader-name { font-weight: 700; font-size: 13px; }
+    .type-badge {
+      display: inline-block; padding: 1px 5px; border-radius: 3px;
+      font-size: 9px; font-weight: 600; letter-spacing: 0.8px;
+    }
+    .type-badge.cfd     { background: rgba(0,196,122,0.10); color: var(--green); }
+    .type-badge.futures { background: rgba(212,136,10,0.12); color: var(--amber); }
+    .trader-metrics { display: flex; gap: 18px; flex-wrap: wrap; }
+    .trader-metric-label {
+      font-size: 9px; color: var(--muted); text-transform: uppercase;
+      letter-spacing: 0.6px; margin-bottom: 2px;
+    }
+    .trader-metric-val { font-family: var(--mono); font-size: 13px; font-weight: 600; }
+    .trader-right { text-align: right; flex-shrink: 0; }
+    .trader-updated { font-size: 10px; color: var(--muted); font-family: var(--mono); }
+    .trader-alltime { font-family: var(--mono); font-size: 20px; font-weight: 700; margin-top: 4px; }
+    .trader-alltime-label { font-size: 9px; color: var(--muted); margin-top: 2px; text-transform: uppercase; letter-spacing: 0.6px; }
+
+    /* ── Colors ───────────────────────────────────────────────── */
     .green { color: var(--green); }
     .red   { color: var(--red); }
     .amber { color: var(--amber); }
 
-    /* Chart */
-    #chart-canvas { width: 100%; height: 140px; display: block; }
-
-    /* Tabs */
-    .tab-bar { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
-    .tab-btn {
-      flex: 1; background: none; border: none; color: var(--muted);
-      font-size: 13px; padding: 8px 4px; cursor: pointer;
-      border-bottom: 2px solid transparent; transition: color 0.2s, border-color 0.2s;
-    }
-    .tab-btn.active { color: var(--green); border-bottom-color: var(--green); }
-    .tab-panel { display: none; }
-    .tab-panel.active { display: block; }
-
-    /* Tables */
-    .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    .data-table th {
-      text-align: left; color: var(--muted); font-weight: 500;
-      padding: 0 0 8px; font-size: 11px; text-transform: uppercase;
-    }
-    .data-table td { padding: 8px 4px 8px 0; border-top: 1px solid var(--border); vertical-align: middle; }
-
-    .side-badge {
-      display: inline-block; padding: 2px 6px; border-radius: 4px;
-      font-size: 10px; font-weight: 600; letter-spacing: 0.5px;
-    }
-    .side-badge.long  { background: rgba(0,196,122,0.15); color: var(--green); }
-    .side-badge.short { background: rgba(255,77,77,0.15);  color: var(--red); }
-
-    .empty { color: var(--muted); font-size: 14px; text-align: center; padding: 16px 0; }
-
-    /* FAB */
+    /* ── FAB (low profile) ────────────────────────────────────── */
     #refresh-btn {
-      position: fixed; bottom: max(24px, env(safe-area-inset-bottom)); right: 24px;
-      width: 48px; height: 48px; border-radius: 50%;
-      background: var(--green); border: none; cursor: pointer;
-      display: flex; align-items: center; justify-content: center;
+      position: fixed; bottom: max(24px, env(safe-area-inset-bottom)); right: 20px;
+      width: 44px; height: 44px; border-radius: 50%;
+      background: var(--surface); border: 1px solid var(--border-hi);
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
       z-index: 200; -webkit-tap-highlight-color: transparent;
+      transition: border-color 0.2s;
     }
-    #refresh-btn svg { width: 22px; height: 22px; fill: #000; }
+    #refresh-btn:active { border-color: var(--green); }
+    #refresh-btn svg { width: 18px; height: 18px; fill: var(--muted); }
     #refresh-btn.spinning svg { animation: spin360 0.6s linear infinite; }
     @keyframes spin360 { to { transform: rotate(360deg); } }
-    #refresh-btn:disabled { opacity: 0.6; cursor: default; }
+    #refresh-btn:disabled { opacity: 0.4; cursor: default; }
 
-    /* iOS banner */
+    /* ── iOS install banner ───────────────────────────────────── */
     #install-banner {
       position: fixed; bottom: 0; left: 0; right: 0;
-      background: #1e1e1e; border-top: 1px solid var(--border);
+      background: var(--surface); border-top: 1px solid var(--border-hi);
       padding: 14px 16px max(14px, env(safe-area-inset-bottom));
       display: flex; align-items: flex-start; gap: 10px; z-index: 300;
-      transform: translateY(100%); transition: transform 0.35s cubic-bezier(0.25,0.46,0.45,0.94);
+      transform: translateY(100%);
+      transition: transform 0.35s cubic-bezier(0.25,0.46,0.45,0.94);
     }
     #install-banner.visible { transform: translateY(0); }
-    #install-banner p { font-size: 13px; color: var(--muted); flex: 1; line-height: 1.4; }
-    #install-banner button { background: none; border: none; color: var(--muted); font-size: 18px; cursor: pointer; padding: 0 4px; flex-shrink: 0; }
+    #install-banner p { font-size: 12px; color: var(--muted); flex: 1; line-height: 1.5; }
+    #install-banner button { background: none; border: none; color: var(--muted); font-size: 16px; cursor: pointer; padding: 0; }
+
+    /* ── Modals — bottom sheets ───────────────────────────────── */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.72);
+      display: none; align-items: flex-end; justify-content: center; z-index: 500;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal-box {
+      background: var(--surface); border: 1px solid var(--border-hi);
+      border-radius: 16px 16px 0 0;
+      padding: 0 20px max(28px, env(safe-area-inset-bottom));
+      width: 100%; max-height: 88vh; overflow-y: auto;
+    }
+    .modal-handle {
+      width: 36px; height: 3px; background: var(--border-hi);
+      border-radius: 2px; margin: 14px auto 20px;
+    }
+    .modal-title { font-size: 15px; font-weight: 700; margin-bottom: 14px; }
+    .modal-field { margin-bottom: 14px; }
+    .modal-field label {
+      display: block; font-size: 10px; text-transform: uppercase;
+      color: var(--muted); margin-bottom: 6px; letter-spacing: 0.8px;
+    }
+    .modal-field input,
+    .modal-field select,
+    .modal-field textarea {
+      width: 100%; background: var(--bg); border: 1px solid var(--border-hi);
+      border-radius: 8px; padding: 10px 12px; color: var(--text);
+      font-size: 15px; outline: none; font-family: var(--sans);
+    }
+    .modal-field input:focus,
+    .modal-field select:focus,
+    .modal-field textarea:focus { border-color: var(--green); }
+    .modal-field select { -webkit-appearance: none; }
+    .modal-field textarea { font-size: 11px; font-family: var(--mono); resize: vertical; }
+    .modal-actions { display: flex; gap: 10px; margin-top: 18px; }
+    .modal-actions button {
+      flex: 1; padding: 12px; border-radius: 8px; border: none;
+      font-size: 14px; font-weight: 600; cursor: pointer; font-family: var(--sans);
+    }
+    .btn-cancel { background: var(--border-hi); color: var(--muted); }
+    .btn-save   { background: var(--green); color: #000; }
+
+    /* ── Trader modal list ────────────────────────────────────── */
+    .modal-trader-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 0; border-bottom: 1px solid var(--border);
+    }
+    .modal-trader-name { font-weight: 600; font-size: 13px; }
+    .modal-trader-id { font-size: 11px; color: var(--muted); font-family: var(--mono); margin-top: 2px; }
+    .btn-remove {
+      background: rgba(232,64,64,0.07); border: 1px solid rgba(232,64,64,0.2);
+      color: var(--red); border-radius: 6px; padding: 4px 10px;
+      font-size: 11px; cursor: pointer; font-family: var(--sans); flex-shrink: 0;
+    }
   </style>
 </head>
 <body>
@@ -177,76 +342,86 @@
 <div id="ptr-indicator">↓ Pull to refresh</div>
 
 <div id="main-wrapper">
+
   <header>
     <div class="logo">BITGET <span>· All Traders</span></div>
-    <span id="last-updated">Waiting for data…</span>
+    <div class="header-right">
+      <span id="status-dot" title="Poller status" onclick="openCookieModal()"></span>
+      <span id="last-updated">—</span>
+    </div>
   </header>
 
-  <!-- Cookie expired warning -->
-  <div id="cookie-expired-banner" style="display:none;margin:0 12px 10px;padding:12px 14px;background:rgba(255,77,77,0.1);border:1px solid rgba(255,77,77,0.35);border-radius:10px;cursor:pointer" onclick="openCookieModal()">
-    <div style="display:flex;align-items:center;gap:10px">
-      <span style="font-size:18px">⚠️</span>
-      <div>
-        <div style="font-weight:600;color:var(--red);font-size:13px">Cookie expired — data is stale</div>
-        <div style="color:var(--muted);font-size:11px;margin-top:2px">Bitget is blocking the poller. Tap to paste a fresh cookie.</div>
-      </div>
-    </div>
+  <div id="cookie-expired-banner" onclick="openCookieModal()">
+    <div class="banner-title">Session expired — data is stale</div>
+    <div class="banner-sub">Tap to paste a fresh cookie</div>
   </div>
 
-  <!-- Waiting message shown until first push -->
   <div id="waiting-msg">
     <strong>Waiting for data</strong>
-    Set up server-side polling below,<br>
-    or use the Tampermonkey script.<br>
-    <button id="open-cookie-btn" style="margin-top:14px;padding:10px 20px;border-radius:8px;border:none;background:var(--green);color:#000;font-weight:600;font-size:14px;cursor:pointer">Set Up Polling</button>
+    Set up server-side polling to begin.
+    <br>
+    <button id="open-cookie-btn" class="btn-outline">Set Up Polling</button>
   </div>
 
-  <!-- Main content (hidden until data arrives) -->
   <div id="content" style="display:none">
 
-    <!-- Balance & Investment -->
-    <div class="balance-bar">
-      <div class="balance-card" id="bal-card" title="Tap to edit">
-        <div class="balance-label">Balance (USDT)</div>
-        <div id="total-balance" class="balance-val">—</div>
+    <!-- Balance -->
+    <div class="section">
+      <div class="section-label">Balance</div>
+      <div class="bal-primary">
+        <div id="total-balance" title="Tap to edit">—</div>
+        <div class="bal-currency">USDT</div>
       </div>
-      <div class="balance-card" id="inv-card" title="Tap to edit">
-        <div class="balance-label">Cumulative Investment</div>
-        <div id="total-investment" class="balance-val">—</div>
+      <div class="bal-sub">
+        <div class="bal-sub-item">
+          <div class="bal-sub-label">Invested</div>
+          <div id="total-investment" title="Tap to edit">—</div>
+        </div>
+        <div class="bal-sub-item" id="return-item" style="display:none">
+          <div class="bal-sub-label">Return</div>
+          <div id="return-pct">—</div>
+        </div>
+      </div>
+      <div class="bal-progress"><div id="bal-progress-fill" class="bal-progress-fill" style="width:0%"></div></div>
+    </div>
+
+    <!-- Daily PnL — accent section -->
+    <div class="daily-section" id="daily-section">
+      <div class="section-label">Daily P&amp;L · Bangkok</div>
+      <div id="daily-pnl">—</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+        <div id="daily-sub">—</div>
+        <span id="daily-badge" class="trend-badge flat" style="display:none"></span>
       </div>
     </div>
 
-    <!-- Hero: Daily PnL -->
-    <div class="card">
-      <div class="card-label">Daily P&amp;L (Bangkok)</div>
-      <div id="daily-pnl" class="big-pnl">—</div>
-      <div id="daily-sub" class="big-sub" style="color:var(--muted)">—</div>
-    </div>
-
-    <!-- 3-stat grid -->
-    <div class="hero-grid">
-      <div class="hero-card">
-        <div class="hero-label">Open PnL</div>
-        <div id="open-pnl" class="hero-val">—</div>
+    <!-- Stats cards — blocks.so bordered card grid -->
+    <div class="stats-cards">
+      <div class="stat-card">
+        <div class="stat-label">Open PnL</div>
+        <div id="open-pnl" class="stat-val">—</div>
+        <span id="open-pnl-badge" class="trend-badge flat" style="display:none"></span>
       </div>
-      <div class="hero-card">
-        <div class="hero-label">Positions</div>
-        <div id="open-count" class="hero-val">—</div>
+      <div class="stat-card">
+        <div class="stat-label">Positions</div>
+        <div id="open-count" class="stat-val">—</div>
+        <span id="positions-badge" class="trend-badge flat" style="display:none"></span>
       </div>
-      <div class="hero-card">
-        <div class="hero-label">All-time</div>
-        <div id="all-time-pnl" class="hero-val">—</div>
+      <div class="stat-card">
+        <div class="stat-label">All-time</div>
+        <div id="all-time-pnl" class="stat-val">—</div>
+        <span id="alltime-badge" class="trend-badge flat" style="display:none"></span>
       </div>
     </div>
 
-    <!-- 30-day chart -->
-    <div class="card">
-      <div class="card-label">30-Day Cumulative P&amp;L</div>
+    <!-- Chart -->
+    <div class="chart-section">
+      <div class="section-label" style="margin-bottom:8px">30-Day Cumulative P&amp;L</div>
       <canvas id="chart-canvas"></canvas>
     </div>
 
-    <!-- Positions + Trade History tabs -->
-    <div class="card">
+    <!-- Positions + History tabs -->
+    <div class="tab-section">
       <div class="tab-bar">
         <button class="tab-btn active" data-tab="positions">Open Positions</button>
         <button class="tab-btn" data-tab="trades">Trade History</button>
@@ -259,16 +434,16 @@
       </div>
     </div>
 
-    <!-- By Trader breakdown -->
-    <div id="traders-section" style="display:none;margin-top:4px">
-      <div style="margin:0 12px 8px;display:flex;align-items:center;justify-content:space-between">
-        <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted)">By Trader</div>
-        <button onclick="openTradersModal()" style="font-size:12px;color:var(--green);background:none;border:none;cursor:pointer;padding:0;font-weight:600">+ Manage</button>
+    <!-- Traders list -->
+    <div id="traders-section" style="display:none">
+      <div class="traders-header">
+        <div class="section-label">By Trader</div>
+        <button class="manage-btn" onclick="openTradersModal()">+ Manage</button>
       </div>
       <div id="traders-cards"></div>
     </div>
 
-  </div><!-- /content -->
+  </div>
 </div>
 
 <button id="refresh-btn" aria-label="Refresh">
@@ -276,65 +451,47 @@
 </button>
 
 <div id="install-banner">
-  <p>Add to Home Screen for the best experience — tap Share then "Add to Home Screen"</p>
+  <p>Add to Home Screen — tap Share then "Add to Home Screen"</p>
   <button id="install-close">✕</button>
 </div>
 
-<!-- Poller status bar -->
-<div id="poller-bar" style="display:none;margin:0 12px 12px;padding:10px 14px;background:var(--card);border:1px solid var(--border);border-radius:10px;font-size:12px;display:flex;align-items:center;justify-content:space-between;cursor:pointer" title="Click to update cookie">
-  <div>
-    <span id="poller-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px"></span>
-    <span id="poller-text" style="color:var(--muted)">Poller</span>
-  </div>
-  <span id="poller-last" style="color:var(--muted);font-size:11px"></span>
-</div>
-
+<!-- Cookie modal -->
 <div class="modal-overlay" id="cookie-modal">
-  <div class="modal-box" style="width:min(400px,92vw)">
+  <div class="modal-box">
+    <div class="modal-handle"></div>
     <div class="modal-title">Server-Side Polling</div>
     <p style="font-size:13px;color:var(--muted);margin-bottom:14px;line-height:1.5">
       Paste your Bitget cookie so the server can fetch data automatically — no need to keep your PC on.
     </p>
     <details style="font-size:12px;color:var(--muted);margin-bottom:14px;cursor:pointer">
-      <summary style="color:var(--green);font-weight:600">How to get your cookie</summary>
-      <div id="cookie-instructions-desktop" style="margin-top:8px">
-        <p style="font-weight:600;margin-bottom:4px">Desktop (Chrome / Firefox)</p>
-        <ol style="padding-left:18px;line-height:1.8">
+      <summary style="color:var(--green);font-weight:600;font-size:12px;letter-spacing:0.3px">How to get your cookie</summary>
+      <div style="margin-top:12px">
+        <p style="font-size:10px;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);margin-bottom:6px;font-weight:600">Desktop (Chrome / Firefox)</p>
+        <ol style="padding-left:18px;line-height:1.9;margin-bottom:14px">
           <li>Open <strong>bitget.com</strong> and log in</li>
-          <li>Press <strong>F12</strong> → <strong>Network</strong> tab</li>
-          <li>Refresh the page</li>
-          <li>Click any request to <strong>bitget.com</strong></li>
-          <li>Find <strong>Cookie</strong> in Request Headers</li>
-          <li>Right-click → Copy value</li>
-          <li>Paste it below</li>
+          <li>Press <strong>F12</strong> → Network tab → refresh</li>
+          <li>Click any request to bitget.com</li>
+          <li>Copy the <strong>Cookie</strong> request header value</li>
         </ol>
-      </div>
-      <div id="cookie-instructions-iphone" style="margin-top:10px">
-        <p style="font-weight:600;margin-bottom:4px">iPhone (easiest: Proxyman)</p>
-        <ol style="padding-left:18px;line-height:1.8">
-          <li>Install <strong>Proxyman</strong> (free) from the App Store</li>
-          <li>Open Proxyman → follow the setup to install its CA certificate</li>
-          <li>Tap <strong>Start</strong> to begin intercepting</li>
-          <li>Open <strong>bitget.com</strong> in Safari and log in</li>
-          <li>Back in Proxyman, find any request to <strong>bitget.com</strong></li>
-          <li>Tap the request → <strong>Request</strong> tab → find <strong>Cookie</strong></li>
-          <li>Long-press → Copy → paste below</li>
+        <p style="font-size:10px;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);margin-bottom:6px;font-weight:600">iPhone — Proxyman (easiest)</p>
+        <ol style="padding-left:18px;line-height:1.9;margin-bottom:14px">
+          <li>Install <strong>Proxyman</strong> from App Store</li>
+          <li>Start intercepting → open bitget.com in Safari</li>
+          <li>Find any bitget.com request → Request tab → Cookie header</li>
         </ol>
-        <p style="font-weight:600;margin-top:10px;margin-bottom:4px">iPhone (with a Mac)</p>
-        <ol style="padding-left:18px;line-height:1.8">
-          <li>iPhone Settings → Safari → Advanced → turn on <strong>Web Inspector</strong></li>
-          <li>Connect iPhone to Mac via USB</li>
-          <li>On Mac: Safari → <strong>Develop</strong> → [your iPhone] → [Bitget tab]</li>
-          <li>Open <strong>Network</strong> tab → find any request → Cookie header</li>
-          <li>Copy the value and paste below</li>
+        <p style="font-size:10px;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);margin-bottom:6px;font-weight:600">iPhone — with a Mac</p>
+        <ol style="padding-left:18px;line-height:1.9">
+          <li>iPhone Settings → Safari → Advanced → Web Inspector on</li>
+          <li>Connect to Mac via USB</li>
+          <li>Mac Safari → Develop → [your iPhone] → Network → Cookie header</li>
         </ol>
       </div>
     </details>
     <div class="modal-field">
       <label>Cookie header value</label>
-      <textarea id="input-cookie" rows="4" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;color:var(--text);font-size:12px;font-family:monospace;outline:none;resize:vertical" placeholder="Paste cookie string here..."></textarea>
+      <textarea id="input-cookie" rows="4" placeholder="Paste cookie string here…"></textarea>
     </div>
-    <div id="cookie-status" style="font-size:12px;margin-bottom:12px;display:none"></div>
+    <div id="cookie-status" style="font-size:12px;margin-bottom:10px;display:none"></div>
     <div class="modal-actions">
       <button class="btn-cancel" id="cookie-cancel">Cancel</button>
       <button class="btn-save" id="cookie-test">Save</button>
@@ -342,9 +499,11 @@
   </div>
 </div>
 
+<!-- Settings modal -->
 <div class="modal-overlay" id="settings-modal">
   <div class="modal-box">
-    <div class="modal-title">Update Balance & Investment</div>
+    <div class="modal-handle"></div>
+    <div class="modal-title">Update Balance &amp; Investment</div>
     <div class="modal-field">
       <label>Total Balance (USDT)</label>
       <input type="number" id="input-balance" inputmode="decimal" step="0.01" placeholder="0.00" />
@@ -362,11 +521,12 @@
 
 <!-- Manage Traders modal -->
 <div class="modal-overlay" id="traders-modal">
-  <div class="modal-box" style="width:min(420px,92vw)">
+  <div class="modal-box">
+    <div class="modal-handle"></div>
     <div class="modal-title">Manage Traders</div>
     <div id="traders-modal-list" style="margin-bottom:14px"></div>
     <hr style="border:none;border-top:1px solid var(--border);margin:0 0 14px">
-    <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted);margin-bottom:10px">Add Trader</div>
+    <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);margin-bottom:12px">Add Trader</div>
     <div class="modal-field">
       <label>Display Name</label>
       <input type="text" id="new-trader-name" placeholder="e.g. XauKingScalp" />
@@ -377,7 +537,7 @@
     </div>
     <div class="modal-field">
       <label>Type</label>
-      <select id="new-trader-type" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;color:var(--text);font-size:16px;outline:none">
+      <select id="new-trader-type">
         <option value="cfd">CFD (MT5)</option>
         <option value="futures">Futures</option>
       </select>
@@ -410,7 +570,7 @@
     ageInterval = setInterval(() => {
       if (!lastFetchTime) return;
       const s = Math.floor((Date.now() - lastFetchTime) / 1000);
-      el.textContent = s < 10 ? 'Just now' : s < 120 ? s + 's ago' : Math.floor(s/60) + 'm ago';
+      el.textContent = s < 10 ? 'live' : s < 120 ? s + 's' : Math.floor(s / 60) + 'm';
       el.className = s > 120 ? 'stale' : '';
     }, 1000);
   }
@@ -425,40 +585,68 @@
     canvas._history = history;
 
     if (!history || history.length < 2) {
-      ctx.fillStyle = '#444'; ctx.font = '13px -apple-system,sans-serif';
-      ctx.textAlign = 'center'; ctx.fillText('No history yet', w/2, h/2); return;
+      ctx.fillStyle = '#4a5e4a'; ctx.font = '12px -apple-system,sans-serif';
+      ctx.textAlign = 'center'; ctx.fillText('No history yet', w / 2, h / 2);
+      return;
     }
     const vals = history.map(d => d.cumulative_pnl);
     const min = Math.min(...vals), max = Math.max(...vals), range = max - min || 1;
-    const pad = { top: 12, right: 8, bottom: 24, left: 52 };
+    const pad = { top: 10, right: 8, bottom: 28, left: 52 };
     const pw = w - pad.left - pad.right, ph = h - pad.top - pad.bottom;
     const xOf = i => pad.left + (i / (vals.length - 1)) * pw;
     const yOf = v => pad.top + ph - ((v - min) / range) * ph;
 
-    ctx.strokeStyle = '#333'; ctx.lineWidth = 1; ctx.setLineDash([3,3]);
+    ctx.strokeStyle = '#1c201c'; ctx.lineWidth = 1; ctx.setLineDash([2, 4]);
     ctx.beginPath(); ctx.moveTo(pad.left, yOf(0)); ctx.lineTo(pad.left + pw, yOf(0)); ctx.stroke();
     ctx.setLineDash([]);
 
     const lastVal = vals[vals.length - 1];
-    const color = lastVal >= 0 ? '#00c47a' : '#ff4d4d';
+    const color = lastVal >= 0 ? '#00c47a' : '#e84040';
     const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ph);
-    grad.addColorStop(0, lastVal >= 0 ? 'rgba(0,196,122,0.3)' : 'rgba(255,77,77,0.3)');
-    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    grad.addColorStop(0, lastVal >= 0 ? 'rgba(0,196,122,0.18)' : 'rgba(232,64,64,0.18)');
+    grad.addColorStop(1, 'rgba(8,10,8,0)');
 
     ctx.beginPath();
     ctx.moveTo(xOf(0), yOf(vals[0]));
     for (let i = 1; i < vals.length; i++) ctx.lineTo(xOf(i), yOf(vals[i]));
-    ctx.lineTo(xOf(vals.length-1), pad.top+ph); ctx.lineTo(xOf(0), pad.top+ph);
+    ctx.lineTo(xOf(vals.length - 1), pad.top + ph); ctx.lineTo(xOf(0), pad.top + ph);
     ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
 
     ctx.beginPath(); ctx.moveTo(xOf(0), yOf(vals[0]));
     for (let i = 1; i < vals.length; i++) ctx.lineTo(xOf(i), yOf(vals[i]));
-    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
 
-    ctx.fillStyle = '#555'; ctx.font = '10px -apple-system,sans-serif'; ctx.textAlign = 'right';
-    [min, (min+max)/2, max].forEach(v => ctx.fillText('$'+v.toFixed(0), pad.left-4, yOf(v)+4));
-    ctx.textAlign = 'left';  ctx.fillText(history[0].date.slice(5), pad.left, h-6);
-    ctx.textAlign = 'right'; ctx.fillText(history[history.length-1].date.slice(5), pad.left+pw, h-6);
+    // Y-axis labels
+    ctx.fillStyle = '#4a5e4a'; ctx.font = '10px -apple-system,sans-serif'; ctx.textAlign = 'right';
+    [min, (min + max) / 2, max].forEach(v => ctx.fillText('$' + v.toFixed(0), pad.left - 4, yOf(v) + 4));
+
+    // X-axis: tick mark + label every ~5 days, always include last day
+    const step = Math.ceil(vals.length / 6); // ~5 for 30 days
+    const labeled = new Set();
+    for (let i = 0; i < vals.length; i += step) labeled.add(i);
+    labeled.add(vals.length - 1);
+
+    ctx.font = '9px -apple-system,sans-serif';
+    labeled.forEach(i => {
+      const x = xOf(i);
+      // tick
+      ctx.strokeStyle = '#2c332c'; ctx.lineWidth = 1; ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(x, pad.top + ph); ctx.lineTo(x, pad.top + ph + 4); ctx.stroke();
+      // label — avoid overlap at right edge
+      ctx.fillStyle = '#4a5e4a';
+      if (i === vals.length - 1) ctx.textAlign = 'right';
+      else if (i === 0) ctx.textAlign = 'left';
+      else ctx.textAlign = 'center';
+      ctx.fillText(history[i].date.slice(5), x, h - 3);
+    });
+
+    // Dot on every data point
+    ctx.fillStyle = color;
+    for (let i = 0; i < vals.length; i++) {
+      ctx.beginPath();
+      ctx.arc(xOf(i), yOf(vals[i]), 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
   function renderPositions(positions) {
@@ -468,8 +656,8 @@
       const cls = colorClass(p.unrealized_pnl);
       return `<tr>
         <td><strong>${p.symbol}</strong><br><span class="side-badge ${p.side}">${p.side.toUpperCase()}</span></td>
-        <td style="text-align:right">${p.size}<br><span style="font-size:11px;color:var(--muted)">@${p.entry_price.toFixed(2)}</span></td>
-        <td class="${cls}" style="text-align:right;font-weight:600">${fmt(p.unrealized_pnl)}</td>
+        <td class="mono" style="text-align:right">${p.size}<br><span style="font-size:10px;color:var(--muted)">@${p.entry_price.toFixed(2)}</span></td>
+        <td class="mono ${cls}" style="text-align:right;font-weight:600">${fmt(p.unrealized_pnl)}</td>
       </tr>`;
     }).join('');
     el.innerHTML = `<table class="data-table">
@@ -483,12 +671,12 @@
     const rows = trades.map(t => {
       const cls = colorClass(t.pnl);
       return `<tr>
-        <td><strong>${t.symbol}</strong><br><span style="font-size:11px;color:var(--muted)">${t.time}</span></td>
+        <td><strong>${t.symbol}</strong><br><span style="font-size:10px;color:var(--muted)">${t.time}</span></td>
         <td><span class="side-badge ${t.side}">${t.side.toUpperCase()}</span><br>
-            <span style="font-size:11px;color:var(--muted)">${t.size} lots</span></td>
+            <span class="mono" style="font-size:10px;color:var(--muted)">${t.size}</span></td>
         <td style="text-align:right">
-          <div class="${cls}" style="font-weight:600">${fmt(t.pnl)}</div>
-          <div style="font-size:11px;color:var(--muted)">fee $${t.commission}</div>
+          <div class="mono ${cls}" style="font-weight:600">${fmt(t.pnl)}</div>
+          <div class="mono" style="font-size:10px;color:var(--muted)">$${t.commission}</div>
         </td>
       </tr>`;
     }).join('');
@@ -508,39 +696,79 @@
         fetch('/api/mt5/history').then(r => r.json()),
       ]);
 
-      if (!mt5.available) return; // still waiting for Tampermonkey push
+      if (!mt5.available) return;
 
       document.getElementById('waiting-msg').style.display = 'none';
       document.getElementById('content').style.display = 'block';
       lastFetchTime = Date.now();
       startAgeTicker();
 
-      // Balance & Investment
+      // Balance
       document.getElementById('total-balance').textContent = fmtBal(mt5.total_balance);
       document.getElementById('total-investment').textContent = fmtBal(mt5.total_investment);
 
-      // Daily PnL
-      const dcls = colorClass(mt5.daily_pnl);
+      // Return % + progress bar
+      if (mt5.total_balance && mt5.total_investment && mt5.total_investment > 0) {
+        const ret = (mt5.total_balance - mt5.total_investment) / mt5.total_investment * 100;
+        const retEl = document.getElementById('return-pct');
+        retEl.textContent = (ret >= 0 ? '+' : '') + ret.toFixed(2) + '%';
+        retEl.className = colorClass(ret);
+        document.getElementById('return-item').style.display = 'block';
+        const fill = document.getElementById('bal-progress-fill');
+        const pct = Math.min(Math.abs(ret) * 5, 100); // scale: 20% return = full bar
+        fill.style.width = pct + '%';
+        fill.className = 'bal-progress-fill' + (ret < 0 ? ' loss' : '');
+      }
+
+      // Daily PnL + badge (daily return %)
       const dpEl = document.getElementById('daily-pnl');
       dpEl.textContent = fmt(mt5.daily_pnl);
-      dpEl.className = 'big-pnl ' + dcls;
-      const dsEl = document.getElementById('daily-sub');
+      dpEl.className = 'daily-pnl-val ' + colorClass(mt5.daily_pnl);
+      document.getElementById('daily-section').className =
+        'daily-section' + (mt5.daily_pnl < 0 ? ' neg' : '');
+
       const bkkNow = new Date(Date.now() + 7 * 3600000);
       const bkkToday = bkkNow.toISOString().slice(0, 10);
       const todayTrades = trades.filter(t => t.time && t.time.startsWith(bkkToday)).length;
-      dsEl.textContent = `${todayTrades} trade${todayTrades !== 1 ? 's' : ''} today`;
-      dsEl.className = 'big-sub ' + dcls;
+      document.getElementById('daily-sub').textContent =
+        todayTrades + ' trade' + (todayTrades !== 1 ? 's' : '') + ' today';
 
-      // Stats grid
+      if (mt5.total_investment > 0) {
+        const dailyRet = mt5.daily_pnl / mt5.total_investment * 100;
+        const db = document.getElementById('daily-badge');
+        db.textContent = (dailyRet >= 0 ? '↑ ' : '↓ ') + Math.abs(dailyRet).toFixed(2) + '%';
+        db.className = 'trend-badge ' + (dailyRet >= 0 ? 'up' : 'down');
+        db.style.display = 'inline-flex';
+      }
+
+      // Stats cards + badges
       const opEl = document.getElementById('open-pnl');
       opEl.textContent = fmt(mt5.open_positions_pnl);
-      opEl.className = 'hero-val ' + colorClass(mt5.open_positions_pnl);
+      opEl.className = 'stat-val ' + colorClass(mt5.open_positions_pnl);
+      if (mt5.open_positions_pnl != null) {
+        const ob = document.getElementById('open-pnl-badge');
+        ob.textContent = mt5.open_positions_pnl >= 0 ? '↑ Profit' : '↓ Loss';
+        ob.className = 'trend-badge ' + (mt5.open_positions_pnl >= 0 ? 'up' : 'down');
+        ob.style.display = 'inline-flex';
+      }
 
-      document.getElementById('open-count').textContent = mt5.open_positions;
+      const posCount = mt5.open_positions ?? 0;
+      document.getElementById('open-count').textContent = posCount;
+      const pb = document.getElementById('positions-badge');
+      pb.textContent = posCount > 0 ? '● Active' : '○ None';
+      pb.className = 'trend-badge ' + (posCount > 0 ? 'up' : 'flat');
+      pb.style.display = 'inline-flex';
 
       const atEl = document.getElementById('all-time-pnl');
       atEl.textContent = fmt(mt5.all_time_pnl);
-      atEl.className = 'hero-val ' + colorClass(mt5.all_time_pnl);
+      atEl.className = 'stat-val ' + colorClass(mt5.all_time_pnl);
+      if (mt5.all_time_pnl != null && mt5.total_investment > 0) {
+        const atRet = mt5.all_time_pnl / mt5.total_investment * 100;
+        const ab = document.getElementById('alltime-badge');
+        ab.textContent = (atRet >= 0 ? '↑ ' : '↓ ') + Math.abs(atRet).toFixed(1) + '%';
+        ab.className = 'trend-badge ' + (atRet >= 0 ? 'up' : 'down');
+        ab.style.display = 'inline-flex';
+      }
 
       renderPositions(positions);
       renderTrades(trades);
@@ -568,41 +796,42 @@
         const dStr   = hasData ? fmt(t.daily_pnl) : '—';
         const oCls   = hasData ? colorClass(t.open_positions_pnl) : '';
         const oStr   = hasData ? fmt(t.open_positions_pnl) : '—';
-        const typeBadge = t.type === 'futures'
-          ? `<span style="font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;background:rgba(245,158,11,0.15);color:var(--amber);margin-left:6px">FUTURES</span>`
-          : `<span style="font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;background:rgba(0,196,122,0.12);color:var(--green);margin-left:6px">CFD</span>`;
-        return `<div class="card" style="margin:0 12px 10px">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-            <div style="display:flex;align-items:center"><span style="font-weight:700;font-size:14px">${t.name}</span>${typeBadge}</div>
-            <div style="font-size:11px;color:var(--muted)">${t.pushed_at ? 'Updated ' + t.pushed_at : hasData ? '' : 'Waiting…'}</div>
+        const typeCls   = t.type === 'futures' ? 'futures' : 'cfd';
+        const typeLabel = t.type === 'futures' ? 'FUTURES' : 'CFD';
+        const atRetPct  = hasData && t.investment > 0
+          ? ((t.all_time_pnl / t.investment) * 100) : null;
+        const atBadge   = atRetPct != null
+          ? `<span class="trend-badge ${atRetPct >= 0 ? 'up' : 'down'}">${atRetPct >= 0 ? '↑' : '↓'} ${Math.abs(atRetPct).toFixed(1)}%</span>`
+          : '';
+        return `<div class="trader-row">
+          <div>
+            <div class="trader-name-row">
+              <span class="trader-name">${t.name}</span>
+              <span class="type-badge ${typeCls}">${typeLabel}</span>
+            </div>
+            <div class="trader-metrics">
+              <div>
+                <div class="trader-metric-label">Balance</div>
+                <div class="trader-metric-val">${balStr}</div>
+              </div>
+              <div>
+                <div class="trader-metric-label">Daily</div>
+                <div class="trader-metric-val ${dCls}">${dStr}</div>
+              </div>
+              <div>
+                <div class="trader-metric-label">Open</div>
+                <div class="trader-metric-val ${oCls}">${oStr}</div>
+              </div>
+            </div>
           </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
-            <div>
-              <div style="font-size:10px;text-transform:uppercase;color:var(--muted);margin-bottom:3px">Balance</div>
-              <div style="font-size:18px;font-weight:700">${balStr}</div>
-            </div>
-            <div>
-              <div style="font-size:10px;text-transform:uppercase;color:var(--muted);margin-bottom:3px">All-time PnL</div>
-              <div class="${atCls}" style="font-size:18px;font-weight:700">${atStr}</div>
-            </div>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
-            <div>
-              <div style="font-size:10px;text-transform:uppercase;color:var(--muted);margin-bottom:3px">Daily</div>
-              <div class="${dCls}" style="font-weight:600">${dStr}</div>
-            </div>
-            <div>
-              <div style="font-size:10px;text-transform:uppercase;color:var(--muted);margin-bottom:3px">Open PnL</div>
-              <div class="${oCls}" style="font-weight:600">${oStr}</div>
-            </div>
-            <div>
-              <div style="font-size:10px;text-transform:uppercase;color:var(--muted);margin-bottom:3px">Invest</div>
-              <div style="font-weight:600">${hasData ? fmtBal(t.investment) : '—'}</div>
-            </div>
+          <div class="trader-right">
+            <div class="trader-updated">${t.pushed_at || (hasData ? '' : 'waiting')}</div>
+            <div class="trader-alltime ${atCls}">${atStr}</div>
+            ${atBadge}
           </div>
         </div>`;
       }).join('');
-    } catch(e) {
+    } catch (e) {
       console.error('traders fetch failed', e);
     }
   }
@@ -633,7 +862,7 @@
     if (!ptrActive) return;
     const dy = e.touches[0].clientY - ptrStartY;
     if (dy > 0 && window.scrollY === 0) {
-      document.getElementById('main-wrapper').style.transform = `translateY(${Math.min(dy*.5,50)}px)`;
+      document.getElementById('main-wrapper').style.transform = `translateY(${Math.min(dy * .5, 50)}px)`;
       ptrEl.classList.add('visible');
       ptrEl.textContent = dy > 60 ? '↑ Release to refresh' : '↓ Pull to refresh';
     }
@@ -662,7 +891,7 @@
   });
 
   // Settings modal
-  const modal = document.getElementById('settings-modal');
+  const settingsModal = document.getElementById('settings-modal');
   const inputBal = document.getElementById('input-balance');
   const inputInv = document.getElementById('input-investment');
 
@@ -670,14 +899,14 @@
     fetch('/api/settings').then(r => r.json()).then(s => {
       inputBal.value = s.balance || '';
       inputInv.value = s.investment || '';
-      modal.classList.add('active');
+      settingsModal.classList.add('active');
     });
   }
 
-  document.getElementById('bal-card').addEventListener('click', openSettings);
-  document.getElementById('inv-card').addEventListener('click', openSettings);
-  document.getElementById('modal-cancel').addEventListener('click', () => modal.classList.remove('active'));
-  modal.addEventListener('click', e => { if (e.target === modal) modal.classList.remove('active'); });
+  document.getElementById('total-balance').addEventListener('click', openSettings);
+  document.getElementById('total-investment').addEventListener('click', openSettings);
+  document.getElementById('modal-cancel').addEventListener('click', () => settingsModal.classList.remove('active'));
+  settingsModal.addEventListener('click', e => { if (e.target === settingsModal) settingsModal.classList.remove('active'); });
 
   document.getElementById('modal-save').addEventListener('click', async () => {
     const body = {};
@@ -688,11 +917,11 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    modal.classList.remove('active');
+    settingsModal.classList.remove('active');
     fetchData();
   });
 
-  // ── Cookie / Poller management ──────────────────────────────────────────
+  // Cookie / poller
   const cookieModal = document.getElementById('cookie-modal');
   const cookieInput = document.getElementById('input-cookie');
   const cookieStatus = document.getElementById('cookie-status');
@@ -700,14 +929,12 @@
   function openCookieModal() {
     cookieStatus.style.display = 'none';
     fetch('/api/poller').then(r => r.json()).then(s => {
-      if (s.has_cookie) cookieInput.value = '(cookie already set — paste new one to replace)';
-      else cookieInput.value = '';
+      cookieInput.value = s.has_cookie ? '(cookie already set — paste new one to replace)' : '';
       cookieModal.classList.add('active');
     });
   }
 
   document.getElementById('open-cookie-btn')?.addEventListener('click', openCookieModal);
-  document.getElementById('poller-bar')?.addEventListener('click', openCookieModal);
   document.getElementById('cookie-cancel').addEventListener('click', () => cookieModal.classList.remove('active'));
   cookieModal.addEventListener('click', e => { if (e.target === cookieModal) cookieModal.classList.remove('active'); });
 
@@ -719,72 +946,43 @@
       return;
     }
     cookieStatus.style.display = 'block';
-    cookieStatus.innerHTML = '<span style="color:var(--muted)">Saving cookie...</span>';
-
+    cookieStatus.innerHTML = '<span style="color:var(--muted)">Saving…</span>';
     const res = await fetch('/api/poller/cookie', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cookie: raw }),
     }).then(r => r.json());
-
     if (res.ok) {
-      cookieStatus.innerHTML = '<span class="green">Cookie saved! Browser will connect within ~15 seconds.</span>';
+      cookieStatus.innerHTML = '<span class="green">Saved. Poller will connect within ~15 seconds.</span>';
       setTimeout(() => {
         cookieModal.classList.remove('active');
         fetchData();
-        updatePollerBar();
+        updatePollerStatus();
       }, 2000);
     } else {
       cookieStatus.innerHTML = '<span class="red">Error: ' + (res.error || 'unknown') + '</span>';
     }
   });
 
-  async function updatePollerBar() {
+  async function updatePollerStatus() {
     try {
       const s = await fetch('/api/poller').then(r => r.json());
-      const bar = document.getElementById('poller-bar');
-      bar.style.display = 'flex';
-      const dot = document.getElementById('poller-dot');
-      const text = document.getElementById('poller-text');
-      const last = document.getElementById('poller-last');
+      const dot = document.getElementById('status-dot');
       const expiredBanner = document.getElementById('cookie-expired-banner');
-
-      // Cookie expired = has a cookie, polled at least once, but auth_ok is explicitly false
       const cookieExpired = s.has_cookie && s.polls > 0 && s.auth_ok === false;
       expiredBanner.style.display = cookieExpired ? 'block' : 'none';
 
-      if (!s.has_cookie) {
-        dot.style.background = 'var(--amber)';
-        text.textContent = 'Poller: no cookie set';
-        last.textContent = 'tap to set up';
-      } else if (cookieExpired) {
-        dot.style.background = 'var(--red)';
-        text.textContent = 'Poller: cookie expired';
-        last.textContent = 'tap to refresh';
-      } else if (s.last_error) {
-        dot.style.background = 'var(--red)';
-        text.textContent = 'Poller: error — ' + s.last_error.slice(0, 40);
-        last.textContent = s.polls + ' polls';
-      } else if (s.browser_alive) {
-        dot.style.background = 'var(--green)';
-        text.textContent = 'Poller: running…';
-        last.textContent = s.polls + ' polls';
-      } else if (s.polls > 0) {
-        dot.style.background = s.pushes > 0 ? 'var(--green)' : 'var(--amber)';
-        text.textContent = 'Poller: idle (' + s.polls + ' polls, ' + (s.pushes || 0) + ' pushes)';
-        last.textContent = s.last_poll ? 'Last: ' + s.last_poll.split(' ')[1] : '';
-      } else {
-        dot.style.background = 'var(--amber)';
-        text.textContent = 'Poller: waiting for first poll…';
-        last.textContent = '';
-      }
+      if (!s.has_cookie)                                          dot.className = 'warn';
+      else if (cookieExpired || s.last_error)                     dot.className = 'err';
+      else if (s.browser_alive || (s.polls > 0 && s.pushes > 0)) dot.className = 'ok';
+      else                                                        dot.className = 'warn';
     } catch (_) {}
   }
 
-  updatePollerBar();
-  setInterval(updatePollerBar, 15_000);
+  updatePollerStatus();
+  setInterval(updatePollerStatus, 15_000);
 
-  // ── Trader management modal ─────────────────────────────────────────────
+  // Traders modal
   const tradersModal = document.getElementById('traders-modal');
   tradersModal.addEventListener('click', e => { if (e.target === tradersModal) tradersModal.classList.remove('active'); });
 
@@ -805,16 +1003,15 @@
       return;
     }
     el.innerHTML = traders.map(t => {
-      const badge = t.type === 'futures'
-        ? `<span style="font-size:10px;font-weight:600;padding:1px 5px;border-radius:3px;background:rgba(245,158,11,0.15);color:var(--amber)">FUTURES</span>`
-        : `<span style="font-size:10px;font-weight:600;padding:1px 5px;border-radius:3px;background:rgba(0,196,122,0.12);color:var(--green)">CFD</span>`;
-      return `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+      const badge = `<span class="type-badge ${t.type === 'futures' ? 'futures' : 'cfd'}">${t.type === 'futures' ? 'FUTURES' : 'CFD'}</span>`;
+      return `<div class="modal-trader-row">
         <div>
-          <span style="font-weight:600;font-size:13px">${t.name}</span>
-          <span style="margin-left:6px">${badge}</span>
-          <div style="font-size:11px;color:var(--muted);margin-top:2px">${t.id}</div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span class="modal-trader-name">${t.name}</span>${badge}
+          </div>
+          <div class="modal-trader-id">${t.id}</div>
         </div>
-        <button onclick="removeTrader('${t.name}')" style="background:rgba(255,77,77,0.1);border:1px solid rgba(255,77,77,0.3);color:var(--red);border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer">Remove</button>
+        <button class="btn-remove" onclick="removeTrader('${t.name}')">Remove</button>
       </div>`;
     }).join('');
   }
@@ -822,23 +1019,18 @@
   async function removeTrader(name) {
     if (!confirm(`Remove ${name}? Their cached data will be cleared.`)) return;
     const res = await fetch(`/api/traders/${encodeURIComponent(name)}`, { method: 'DELETE' }).then(r => r.json());
-    if (res.ok) {
-      await refreshTradersModalList();
-      fetchTraders();
-      fetchData();
-    } else {
-      alert('Error: ' + (res.error || 'unknown'));
-    }
+    if (res.ok) { await refreshTradersModalList(); fetchTraders(); fetchData(); }
+    else alert('Error: ' + (res.error || 'unknown'));
   }
 
   document.getElementById('trader-add-btn').addEventListener('click', async () => {
-    const name  = document.getElementById('new-trader-name').value.trim();
-    const id    = document.getElementById('new-trader-id').value.trim();
-    const type  = document.getElementById('new-trader-type').value;
+    const name   = document.getElementById('new-trader-name').value.trim();
+    const id     = document.getElementById('new-trader-id').value.trim();
+    const type   = document.getElementById('new-trader-type').value;
     const status = document.getElementById('trader-add-status');
     if (!name || !id) {
       status.style.display = 'block';
-      status.innerHTML = '<span class="amber">Please fill in name and portfolio ID.</span>';
+      status.innerHTML = '<span class="amber">Fill in name and portfolio ID.</span>';
       return;
     }
     status.style.display = 'block';
@@ -849,7 +1041,7 @@
       body: JSON.stringify({ name, id, type }),
     }).then(r => r.json());
     if (res.ok) {
-      status.innerHTML = `<span class="green">${name} added! Data will appear after the next poll (~2 min).</span>`;
+      status.innerHTML = `<span class="green">${name} added. Data in ~2 min.</span>`;
       document.getElementById('new-trader-name').value = '';
       document.getElementById('new-trader-id').value = '';
       await refreshTradersModalList();
