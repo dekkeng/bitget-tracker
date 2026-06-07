@@ -425,8 +425,9 @@
       <div class="stat-card">
         <div class="stat-label">All-time</div>
         <div id="all-time-pnl" class="stat-val">—</div>
-        <span id="alltime-badge" class="trend-badge flat" style="display:none" title="Realized P&L ÷ invested · closed trades only · excludes open positions"></span>
-        <div style="font-size:9px;color:var(--muted);margin-top:3px;letter-spacing:0.3px">invested return</div>
+        <span style="display:inline-flex;align-items:center;gap:4px">
+          <span id="alltime-badge" class="trend-badge flat" style="display:none" title="Realized P&L ÷ invested · closed trades only · excludes open positions"></span><span id="alltime-badge-label" style="display:none;font-size:9px;color:var(--muted);letter-spacing:0.3px">invested return</span>
+        </span>
       </div>
     </div>
 
@@ -900,8 +901,10 @@
         ab.textContent = (atRet > 0 ? '↑ ' : '↓ ') + Math.abs(atRet).toFixed(1) + '%';
         ab.className = 'trend-badge ' + (atRet > 0 ? 'up' : 'down');
         ab.style.display = 'inline-flex';
+        document.getElementById('alltime-badge-label').style.display = 'inline';
       } else {
         document.getElementById('alltime-badge').style.display = 'none';
+        document.getElementById('alltime-badge-label').style.display = 'none';
       }
 
       renderPositions(positions);
