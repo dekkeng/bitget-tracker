@@ -103,12 +103,7 @@
       font-family: var(--sans); flex-shrink: 0;
     }
     .api-badge.loading { background: rgba(74,94,74,0.12); color: var(--muted); }
-    #inv-refresh-btn {
-      background: none; border: none; cursor: pointer; color: var(--muted);
-      font-size: 10px; font-family: var(--sans); padding: 0;
-      -webkit-tap-highlight-color: transparent;
-    }
-    #inv-refresh-btn:hover { color: var(--green); }
+
     #theme-toggle {
       display: flex; align-items: center;
       background: var(--border); border-radius: 999px;
@@ -502,7 +497,6 @@
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
               <span class="api-badge" id="inv-api-badge">API</span>
               <span style="font-size:10px;color:var(--muted)" id="inv-api-time"></span>
-              <button id="inv-refresh-btn" onclick="refreshInvestment()">↻ Refresh</button>
             </div>
             <div class="inv-api-row">
               <div class="inv-api-item">
@@ -1017,15 +1011,6 @@
     } catch(e) { console.error('fetchInvestment', e); }
   }
 
-  async function refreshInvestment() {
-    const btn = document.getElementById('inv-refresh-btn');
-    btn.textContent = '↻ …'; btn.disabled = true;
-    await fetch('/api/investment/refresh', { method: 'POST' });
-    await new Promise(r => setTimeout(r, 3000));
-    await fetchInvestment();
-    btn.textContent = '↻ Refresh'; btn.disabled = false;
-  }
-
   async function fetchData() {
     const btn = document.getElementById('refresh-btn');
     btn.disabled = true; btn.classList.add('spinning');
@@ -1218,10 +1203,9 @@
   fetchData();
   fetchTraders();
   fetchInvestment();
-  setInterval(fetchData, 10_000);
+  setInterval(() => { fetchData(); fetchInvestment(); }, 120_000);
   setInterval(fetchTraders, 30_000);
-  setInterval(fetchInvestment, 5 * 60 * 1000);  // refresh display every 5 min
-  document.getElementById('refresh-btn').addEventListener('click', () => { fetchData(); fetchTraders(); });
+  document.getElementById('refresh-btn').addEventListener('click', () => { fetchData(); fetchTraders(); fetchInvestment(); });
 
   // Tabs
   document.querySelectorAll('.tab-btn').forEach(btn => {

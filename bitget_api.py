@@ -111,14 +111,23 @@ async def fetch_net_investment(api_key: str, secret: str, passphrase: str,
     """
     Return net investment = total deposits - total withdrawals for coin.
     Only counts records with a success/completed status.
+
+    Note: deposit-records rejects a coin= filter (400172) so we fetch all
+    coins and filter client-side. withdrawal-records accepts coin= fine.
     """
     async with httpx.AsyncClient(timeout=20) as client:
-        (deposits, dep_meta), (withdrawals, wdw_meta) = await asyncio.gather(
+        # Deposits: no coin filter — Bitget returns 400172 if coin= is passed
+        # Withdrawals: coin filter works fine
+        (deposits_all, dep_meta), (withdrawals, wdw_meta) = await asyncio.gather(
             _get_all_pages(client, "/api/v2/spot/wallet/deposit-records",
-                           {"coin": coin}, api_key, secret, passphrase),
+                           {}, api_key, secret, passphrase),
             _get_all_pages(client, "/api/v2/spot/wallet/withdrawal-records",
                            {"coin": coin}, api_key, secret, passphrase),
         )
+
+    # Filter deposits by coin client-side
+    deposits = [r for r in deposits_all
+                if r.get("coin", "").upper() == coin.upper()]
 
     dep_success = [r for r in deposits if _is_success(r)]
     wdw_success = [r for r in withdrawals if _is_success(r)]
