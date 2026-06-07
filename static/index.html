@@ -1145,9 +1145,13 @@
   const cookieStatus = document.getElementById('cookie-status');
 
   function openCookieModal() {
+    cookieInput.value = '';
     cookieStatus.style.display = 'none';
     fetch('/api/poller').then(r => r.json()).then(s => {
-      cookieInput.value = s.has_cookie ? '(cookie already set — paste new one to replace)' : '';
+      if (s.has_cookie) {
+        cookieStatus.style.display = 'block';
+        cookieStatus.innerHTML = '<span style="color:var(--muted)">Cookie already set — paste a new one below to replace it.</span>';
+      }
       cookieModal.classList.add('active');
     });
   }
