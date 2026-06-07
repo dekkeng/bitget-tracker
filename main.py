@@ -818,6 +818,21 @@ async def reset_trader_data(name: str):
 @app.get("/api/investment")
 async def get_investment():
     creds = _load_credentials()
+    data = _investment["data"] or {}
+    # Strip internal diagnostic fields from the public response
+    public = {k: v for k, v in data.items() if not k.startswith("_")}
+    return {
+        **public,
+        "fetched_at": _investment["fetched_at"],
+        "error": _investment["error"],
+        "has_credentials": creds is not None,
+    }
+
+
+@app.get("/api/investment/debug")
+async def get_investment_debug():
+    """Full investment data including raw diagnostic fields."""
+    creds = _load_credentials()
     return {
         **(_investment["data"] or {}),
         "fetched_at": _investment["fetched_at"],
