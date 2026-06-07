@@ -382,6 +382,11 @@
       color: var(--red); border-radius: 6px; padding: 4px 10px;
       font-size: 11px; cursor: pointer; font-family: var(--sans); flex-shrink: 0;
     }
+    .btn-reset-data {
+      background: rgba(74,94,74,0.08); border: 1px solid var(--border-hi);
+      color: var(--muted); border-radius: 6px; padding: 4px 10px;
+      font-size: 11px; cursor: pointer; font-family: var(--sans); flex-shrink: 0;
+    }
 
     /* ── Goal ring ────────────────────────────────────────────── */
     .bal-goal-layout {
@@ -1294,9 +1299,18 @@
           </div>
           <div class="modal-trader-id">${t.id}</div>
         </div>
-        <button class="btn-remove" onclick="removeTrader('${t.name}')">Remove</button>
+        <div style="display:flex;gap:6px;flex-shrink:0">
+          <button class="btn-reset-data" onclick="resetTraderData('${t.name}')" title="Clear cached balance/investment data">Reset data</button>
+          <button class="btn-remove" onclick="removeTrader('${t.name}')">Remove</button>
+        </div>
       </div>`;
     }).join('');
+  }
+
+  async function resetTraderData(name) {
+    const res = await fetch(`/api/traders/${encodeURIComponent(name)}/reset`, { method: 'POST' }).then(r => r.json());
+    if (res.ok) { fetchTraders(); fetchData(); }
+    else alert('Error: ' + (res.error || 'unknown'));
   }
 
   async function removeTrader(name) {

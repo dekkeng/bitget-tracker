@@ -385,7 +385,12 @@ def _push_data(kind: str, data, trader: str = None):
             if changed:
                 _save_settings(_settings)
     elif kind == "fund_flow":
-        # Futures copy trading transfer history — compute net investment
+        # Futures copy trading transfer history — compute net investment.
+        # Only applies to futures traders; ignore if type has already changed to cfd
+        # (prevents a mid-cycle push from writing futures data back after a type switch).
+        if _trader_type(trader) != "futures":
+            logger.info("Ignoring fund_flow for %s (type is now %s)", trader, _trader_type(trader))
+            return
         rows = data if isinstance(data, list) else []
         if rows:
             inv = _calc_futures_investment(rows)
@@ -413,6 +418,17 @@ def _push_data(kind: str, data, trader: str = None):
 def _rebuild_trader_summary(name: str) -> dict:
     tc = _tc(name)
     ts = _ts(name)
+
+    # Auto-clear stale settings when trader type changes (e.g. futures → cfd)
+    current_type = _trader_type(name)
+    prev_type = ts.get("_type")
+    if prev_type and prev_type != current_type:
+        logger.info("Trader %s type changed %s→%s, clearing stale settings", name, prev_type, current_type)
+        ts.clear()
+        ts["_type"] = current_type
+        _save_settings(_settings)
+    elif not prev_type:
+        ts["_type"] = current_type
 
     trades = _parse_trades(tc["history_raw"])
     history = _parse_history_chart(trades)
@@ -718,6 +734,22 @@ async def remove_trader(name: str):
     except Exception:
         pass
     return {"ok": True, "traders": _traders_list}
+
+
+@app.post("/api/traders/{name}/reset")
+async def reset_trader_data(name: str):
+    """Clear cached settings and in-memory data for a trader without removing it."""
+    if not any(t["name"] == name for t in _traders_list):
+        return {"ok": False, "error": f"Trader '{name}' not found"}
+    _traders_cache.pop(name, None)
+    _settings.get("traders", {}).pop(name, None)
+    _save_settings(_settings)
+    try:
+        _rebuild_summary()
+    except Exception:
+        pass
+    logger.info("Trader data reset: name=%s", name)
+    return {"ok": True}
 
 
 # ── Browser poller endpoints ─────────────────────────────────────────────────
