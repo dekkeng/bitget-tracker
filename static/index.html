@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>Bitget CFD Tracker · v5</title>
+  <title>Bitget CFD Tracker · v6</title>
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Bitget" />
-  <meta name="theme-color" content="#080a08" />
+  <meta name="theme-color" content="#080a08" id="theme-color-meta" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet" />
@@ -29,6 +29,20 @@
       --mono:         'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
       --sans:         -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }
+
+    html[data-theme="light"] {
+      --bg:        #f2f5f2;
+      --surface:   #ffffff;
+      --border:    #dde5dd;
+      --border-hi: #c5d0c5;
+      --text:      #0d160d;
+      --muted:     #6b7e6b;
+      --green:     #009a5e;
+      --red:       #d42e2e;
+      --amber:     #b8720a;
+    }
+
+    html { transition: background 0.2s, color 0.2s; }
 
     html, body {
       background: var(--bg); color: var(--text);
@@ -73,6 +87,15 @@
       font-family: var(--mono); cursor: default;
     }
     #last-updated.stale { color: var(--amber); }
+    #theme-btn {
+      background: none; border: none; padding: 0;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      width: 22px; height: 22px; color: var(--muted);
+      -webkit-tap-highlight-color: transparent;
+      transition: color 0.2s;
+    }
+    #theme-btn:hover { color: var(--text); }
+    #theme-btn svg { width: 15px; height: 15px; fill: currentColor; }
 
     /* ── Cookie expired banner ────────────────────────────────── */
     #cookie-expired-banner {
@@ -396,6 +419,11 @@
   <header>
     <div class="logo">BITGET <span>· All Traders</span></div>
     <div class="header-right">
+      <button id="theme-btn" title="Toggle light/dark mode" aria-label="Toggle theme">
+        <!-- icon swapped by JS -->
+        <svg id="theme-icon-dark" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z"/></svg>
+        <svg id="theme-icon-light" viewBox="0 0 24 24" style="display:none"><path d="M12 7a5 5 0 1 0 0 10A5 5 0 0 0 12 7zm0-5a1 1 0 0 1 1 1v1a1 1 0 0 1-2 0V3a1 1 0 0 1 1-1zm0 17a1 1 0 0 1 1 1v1a1 1 0 0 1-2 0v-1a1 1 0 0 1 1-1zm9-9a1 1 0 0 1 0 2h-1a1 1 0 0 1 0-2h1zM4 11a1 1 0 0 1 0 2H3a1 1 0 0 1 0-2h1zm13.66-5.66a1 1 0 0 1 0 1.41l-.71.71a1 1 0 1 1-1.41-1.41l.71-.71a1 1 0 0 1 1.41 0zM7.05 17.66a1 1 0 0 1 0 1.41l-.71.71a1 1 0 1 1-1.41-1.41l.71-.71a1 1 0 0 1 1.41 0zm11.32 0a1 1 0 0 1-1.41 1.41l-.71-.71a1 1 0 0 1 1.41-1.41l.71.71zM5.64 5.64a1 1 0 0 1 1.41 1.41l-.71.71A1 1 0 0 1 4.93 6.34l.71-.7z"/></svg>
+      </button>
       <span id="status-dot" title="Poller status" onclick="openCookieModal()"></span>
       <span id="last-updated">—</span>
     </div>
@@ -623,6 +651,32 @@
 </div>
 
 <script>
+  // ── Theme ─────────────────────────────────────────────────────
+  const THEME_KEY = 'bitget_theme';
+  function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    const isDark = theme === 'dark';
+    document.getElementById('theme-color-meta').content = isDark ? '#080a08' : '#f2f5f2';
+    document.getElementById('theme-icon-dark').style.display  = isDark ? 'block' : 'none';
+    document.getElementById('theme-icon-light').style.display = isDark ? 'none'  : 'block';
+    const c = document.getElementById('chart-canvas');
+    if (c._history) drawChart(c._history);
+  }
+  (function () {
+    const saved = localStorage.getItem(THEME_KEY);
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    applyTheme(saved || (prefersDark ? 'dark' : 'light'));
+  })();
+  document.getElementById('theme-btn').addEventListener('click', () => {
+    const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    localStorage.setItem(THEME_KEY, next);
+    applyTheme(next);
+  });
+
+  function cssVar(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
   let lastFetchTime = null, ageInterval = null;
 
   function fmt(n, digits = 2) {
@@ -657,8 +711,9 @@
     ctx.scale(dpr, dpr);
     canvas._history = history;
 
+    const C = { muted: cssVar('--muted'), border: cssVar('--border'), borderHi: cssVar('--border-hi'), bg: cssVar('--bg'), text: cssVar('--text') };
     if (!history || history.length < 2) {
-      ctx.fillStyle = '#4a5e4a'; ctx.font = '12px -apple-system,sans-serif';
+      ctx.fillStyle = C.muted; ctx.font = '12px -apple-system,sans-serif';
       ctx.textAlign = 'center'; ctx.fillText('No history yet', w / 2, h / 2);
       return;
     }
@@ -704,7 +759,7 @@
     }
 
     // Zero baseline (dashed)
-    ctx.strokeStyle = '#1c201c'; ctx.lineWidth = 1; ctx.setLineDash([2, 4]);
+    ctx.strokeStyle = C.border; ctx.lineWidth = 1; ctx.setLineDash([2, 4]);
     ctx.beginPath(); ctx.moveTo(pad.left, yOf(0)); ctx.lineTo(pad.left + pw, yOf(0)); ctx.stroke();
     ctx.setLineDash([]);
 
@@ -726,11 +781,11 @@
     ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
 
     // Left y-axis labels (cumulative)
-    ctx.fillStyle = '#4a5e4a'; ctx.font = '10px -apple-system,sans-serif'; ctx.textAlign = 'right';
+    ctx.fillStyle = C.muted; ctx.font = '10px -apple-system,sans-serif'; ctx.textAlign = 'right';
     [min, (min + max) / 2, max].forEach(v => ctx.fillText('$' + v.toFixed(0), pad.left - 4, yOf(v) + 4));
 
     // Right y-axis labels (daily PnL scale)
-    ctx.textAlign = 'left'; ctx.font = '9px -apple-system,sans-serif';
+    ctx.fillStyle = C.muted; ctx.textAlign = 'left'; ctx.font = '9px -apple-system,sans-serif';
     const rx = pad.left + pw + 3;
     const topBarY = zeroY - dAbsMax * barScale;
     const botBarY = zeroY + dAbsMax * barScale;
@@ -746,9 +801,9 @@
     ctx.font = '9px -apple-system,sans-serif';
     labeled.forEach(i => {
       const x = xOf(i);
-      ctx.strokeStyle = '#2c332c'; ctx.lineWidth = 1; ctx.setLineDash([]);
+      ctx.strokeStyle = C.borderHi; ctx.lineWidth = 1; ctx.setLineDash([]);
       ctx.beginPath(); ctx.moveTo(x, pad.top + ph); ctx.lineTo(x, pad.top + ph + 4); ctx.stroke();
-      ctx.fillStyle = '#4a5e4a';
+      ctx.fillStyle = C.muted;
       ctx.textAlign = i === vals.length - 1 ? 'right' : i === 0 ? 'left' : 'center';
       ctx.fillText(history[i].date.slice(5), x, h - 3);
     });
@@ -762,11 +817,11 @@
     // Hover crosshair + enlarged dot
     if (hoverIdx != null) {
       const px = xOf(hoverIdx), py = yOf(vals[hoverIdx]);
-      ctx.strokeStyle = 'rgba(221,232,221,0.12)'; ctx.lineWidth = 1; ctx.setLineDash([]);
+      ctx.strokeStyle = C.borderHi; ctx.lineWidth = 1; ctx.setLineDash([]);
       ctx.beginPath(); ctx.moveTo(px, pad.top); ctx.lineTo(px, pad.top + ph); ctx.stroke();
       ctx.fillStyle = color;
       ctx.beginPath(); ctx.arc(px, py, 4.5, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#080a08';
+      ctx.fillStyle = C.bg;
       ctx.beginPath(); ctx.arc(px, py, 2, 0, Math.PI * 2); ctx.fill();
     }
   }
