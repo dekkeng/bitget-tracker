@@ -117,7 +117,7 @@ if (family === "accessoryRectangular") {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SMALL — today PnL + balance
+// SMALL — balance + today PnL
 // ══════════════════════════════════════════════════════════════════════════════
 if (family === "small") {
   const sw = new ListWidget();
@@ -125,12 +125,20 @@ if (family === "small") {
   sw.setPadding(14, 14, 12, 14);
   sw.refreshAfterDate = new Date(Date.now() + 2 * 60 * 1000);
 
+  // Balance — primary anchor at top
+  note(sw, "balance", 8);
+  sw.addSpacer(5);
+  digits(sw, fmtUSD(bal), 20, TEXT, true);
+
+  sw.addSpacer(12);
+
+  // Today PnL
   note(sw, "today", 8);
-  sw.addSpacer(6);
-  digits(sw, fmtPnL(pnl), 22, pnlColor(pnl), true);
+  sw.addSpacer(5);
+  digits(sw, fmtPnL(pnl), 17, pnlColor(pnl), true);
+
+  // Timestamp pinned to bottom
   sw.addSpacer();
-  note(sw, fmtUSD(bal), 11, MUTED);
-  sw.addSpacer(4);
   note(sw, updAt + (stale ? " · stale" : ""), 8, stale ? AMBER : MUTED);
 
   Script.setWidget(sw);
