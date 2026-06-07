@@ -173,8 +173,19 @@
     .chart-section {
       padding: 16px 16px 0;
       border-bottom: 1px solid var(--border);
+      position: relative;
     }
-    #chart-canvas { width: 100%; height: 160px; display: block; }
+    #chart-canvas { width: 100%; height: 160px; display: block; cursor: crosshair; }
+
+    /* ── Chart tooltip ────────────────────────────────────────── */
+    #chart-tooltip {
+      position: absolute; display: none; pointer-events: none;
+      background: var(--surface); border: 1px solid var(--border-hi);
+      border-radius: 6px; padding: 6px 10px; z-index: 10;
+      white-space: nowrap;
+    }
+    .ct-date { font-size: 9px; color: var(--muted); margin-bottom: 3px; letter-spacing: 0.5px; text-transform: uppercase; }
+    .ct-val  { font-family: var(--mono); font-size: 13px; font-weight: 700; }
 
     /* ── Tabs ─────────────────────────────────────────────────── */
     .tab-section { border-bottom: 1px solid var(--border); }
@@ -418,6 +429,7 @@
     <div class="chart-section">
       <div class="section-label" style="margin-bottom:8px">30-Day Cumulative P&amp;L</div>
       <canvas id="chart-canvas"></canvas>
+      <div id="chart-tooltip"><div class="ct-date"></div><div class="ct-val"></div></div>
     </div>
 
     <!-- Positions + History tabs -->
@@ -576,7 +588,7 @@
     }, 1000);
   }
 
-  function drawChart(history) {
+  function drawChart(history, hoverIdx) {
     const canvas = document.getElementById('chart-canvas');
     const dpr = window.devicePixelRatio || 1;
     const w = canvas.offsetWidth, h = canvas.offsetHeight;
@@ -596,6 +608,9 @@
     const pw = w - pad.left - pad.right, ph = h - pad.top - pad.bottom;
     const xOf = i => pad.left + (i / (vals.length - 1)) * pw;
     const yOf = v => pad.top + ph - ((v - min) / range) * ph;
+
+    // Store state for hover redraws
+    canvas._state = { vals, min, max, pad, pw, ph, w, h, xOf, yOf, history };
 
     ctx.strokeStyle = '#1c201c'; ctx.lineWidth = 1; ctx.setLineDash([2, 4]);
     ctx.beginPath(); ctx.moveTo(pad.left, yOf(0)); ctx.lineTo(pad.left + pw, yOf(0)); ctx.stroke();
@@ -621,33 +636,81 @@
     ctx.fillStyle = '#4a5e4a'; ctx.font = '10px -apple-system,sans-serif'; ctx.textAlign = 'right';
     [min, (min + max) / 2, max].forEach(v => ctx.fillText('$' + v.toFixed(0), pad.left - 4, yOf(v) + 4));
 
-    // X-axis: tick mark + label every ~5 days, always include last day
-    const step = Math.ceil(vals.length / 6); // ~5 for 30 days
+    // X-axis ticks + labels every ~5 days
+    const step = Math.ceil(vals.length / 6);
     const labeled = new Set();
     for (let i = 0; i < vals.length; i += step) labeled.add(i);
     labeled.add(vals.length - 1);
-
     ctx.font = '9px -apple-system,sans-serif';
     labeled.forEach(i => {
       const x = xOf(i);
-      // tick
       ctx.strokeStyle = '#2c332c'; ctx.lineWidth = 1; ctx.setLineDash([]);
       ctx.beginPath(); ctx.moveTo(x, pad.top + ph); ctx.lineTo(x, pad.top + ph + 4); ctx.stroke();
-      // label — avoid overlap at right edge
       ctx.fillStyle = '#4a5e4a';
-      if (i === vals.length - 1) ctx.textAlign = 'right';
-      else if (i === 0) ctx.textAlign = 'left';
-      else ctx.textAlign = 'center';
+      ctx.textAlign = i === vals.length - 1 ? 'right' : i === 0 ? 'left' : 'center';
       ctx.fillText(history[i].date.slice(5), x, h - 3);
     });
 
     // Dot on every data point
     ctx.fillStyle = color;
     for (let i = 0; i < vals.length; i++) {
-      ctx.beginPath();
-      ctx.arc(xOf(i), yOf(vals[i]), 1.5, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.beginPath(); ctx.arc(xOf(i), yOf(vals[i]), 1.5, 0, Math.PI * 2); ctx.fill();
     }
+
+    // Hover crosshair + enlarged dot
+    if (hoverIdx != null) {
+      const px = xOf(hoverIdx), py = yOf(vals[hoverIdx]);
+      ctx.strokeStyle = 'rgba(221,232,221,0.12)'; ctx.lineWidth = 1; ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(px, pad.top); ctx.lineTo(px, pad.top + ph); ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(px, py, 4.5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#080a08';
+      ctx.beginPath(); ctx.arc(px, py, 2, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // Wire chart hover once after first draw
+  let _chartHoverWired = false;
+  function wireChartHover() {
+    if (_chartHoverWired) return;
+    _chartHoverWired = true;
+    const canvas = document.getElementById('chart-canvas');
+    const tooltip = document.getElementById('chart-tooltip');
+    const ttDate = tooltip.querySelector('.ct-date');
+    const ttVal  = tooltip.querySelector('.ct-val');
+
+    function showHover(clientX) {
+      const s = canvas._state;
+      if (!s) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = clientX - rect.left;
+      const idx = Math.max(0, Math.min(s.vals.length - 1,
+        Math.round((x - s.pad.left) / s.pw * (s.vals.length - 1))));
+      drawChart(canvas._history, idx);
+
+      const v = s.vals[idx];
+      const c = v > 0 ? '#00c47a' : v < 0 ? '#e84040' : '#dde8dd';
+      ttDate.textContent = s.history[idx].date.slice(5);
+      ttVal.textContent  = v === 0 ? '$0.00' : (v > 0 ? '+' : '-') + '$' + Math.abs(v).toFixed(2);
+      ttVal.style.color  = c;
+
+      const parentW = canvas.parentElement.clientWidth;
+      const tipW = tooltip.offsetWidth || 90;
+      const tipX = s.xOf(idx);
+      tooltip.style.left = (tipX + 12 + tipW > parentW ? tipX - tipW - 8 : tipX + 12) + 'px';
+      tooltip.style.top  = Math.max(4, s.yOf(v) - 42) + 'px';
+      tooltip.style.display = 'block';
+    }
+
+    function hideHover() {
+      tooltip.style.display = 'none';
+      if (canvas._history) drawChart(canvas._history);
+    }
+
+    canvas.addEventListener('mousemove', e => showHover(e.clientX));
+    canvas.addEventListener('mouseleave', hideHover);
+    canvas.addEventListener('touchmove', e => { e.preventDefault(); showHover(e.touches[0].clientX); }, { passive: false });
+    canvas.addEventListener('touchend', hideHover, { passive: true });
   }
 
   function renderPositions(positions) {
@@ -734,8 +797,9 @@
       document.getElementById('daily-sub').textContent =
         todayTrades + ' trade' + (todayTrades !== 1 ? 's' : '') + ' today';
 
-      if (mt5.total_investment > 0 && mt5.daily_pnl !== 0) {
-        const dailyRet = mt5.daily_pnl / mt5.total_investment * 100;
+      const dailyRet = (mt5.total_investment > 0 && mt5.daily_pnl != null)
+        ? mt5.daily_pnl / mt5.total_investment * 100 : 0;
+      if (Math.abs(dailyRet) >= 0.05) {
         const db = document.getElementById('daily-badge');
         db.textContent = (dailyRet > 0 ? '↑ ' : '↓ ') + Math.abs(dailyRet).toFixed(2) + '%';
         db.className = 'trend-badge ' + (dailyRet > 0 ? 'up' : 'down');
@@ -748,7 +812,7 @@
       const opEl = document.getElementById('open-pnl');
       opEl.textContent = fmt(mt5.open_positions_pnl);
       opEl.className = 'stat-val ' + colorClass(mt5.open_positions_pnl);
-      if (mt5.open_positions_pnl != null && mt5.open_positions_pnl !== 0) {
+      if (mt5.open_positions_pnl != null && Math.abs(mt5.open_positions_pnl) >= 0.01) {
         const ob = document.getElementById('open-pnl-badge');
         ob.textContent = mt5.open_positions_pnl > 0 ? '↑ Profit' : '↓ Loss';
         ob.className = 'trend-badge ' + (mt5.open_positions_pnl > 0 ? 'up' : 'down');
@@ -767,8 +831,9 @@
       const atEl = document.getElementById('all-time-pnl');
       atEl.textContent = fmt(mt5.all_time_pnl);
       atEl.className = 'stat-val ' + colorClass(mt5.all_time_pnl);
-      if (mt5.all_time_pnl != null && mt5.all_time_pnl !== 0 && mt5.total_investment > 0) {
-        const atRet = mt5.all_time_pnl / mt5.total_investment * 100;
+      const atRet = (mt5.all_time_pnl != null && mt5.total_investment > 0)
+        ? mt5.all_time_pnl / mt5.total_investment * 100 : 0;
+      if (Math.abs(atRet) >= 0.05) {
         const ab = document.getElementById('alltime-badge');
         ab.textContent = (atRet > 0 ? '↑ ' : '↓ ') + Math.abs(atRet).toFixed(1) + '%';
         ab.className = 'trend-badge ' + (atRet > 0 ? 'up' : 'down');
@@ -780,6 +845,7 @@
       renderPositions(positions);
       renderTrades(trades);
       drawChart(history);
+      wireChartHover();
     } catch (e) {
       console.error(e);
     } finally {
@@ -805,8 +871,8 @@
         const oStr   = hasData ? fmt(t.open_positions_pnl) : '—';
         const typeCls   = t.type === 'futures' ? 'futures' : 'cfd';
         const typeLabel = t.type === 'futures' ? 'FUTURES' : 'CFD';
-        const atRetPct  = hasData && t.investment > 0 && t.all_time_pnl !== 0
-          ? ((t.all_time_pnl / t.investment) * 100) : null;
+        const _atRetRaw = hasData && t.investment > 0 ? (t.all_time_pnl / t.investment) * 100 : 0;
+        const atRetPct  = Math.abs(_atRetRaw) >= 0.05 ? _atRetRaw : null;
         const atBadge   = atRetPct != null
           ? `<span class="trend-badge ${atRetPct > 0 ? 'up' : 'down'}">${atRetPct > 0 ? '↑' : '↓'} ${Math.abs(atRetPct).toFixed(1)}%</span>`
           : '';
