@@ -117,7 +117,7 @@ if (family === "accessoryRectangular") {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SMALL — balance + today PnL
+// SMALL — 2-col top (balance | all-time), today below
 // ══════════════════════════════════════════════════════════════════════════════
 if (family === "small") {
   const sw = new ListWidget();
@@ -125,17 +125,28 @@ if (family === "small") {
   sw.setPadding(14, 14, 12, 14);
   sw.refreshAfterDate = new Date(Date.now() + 2 * 60 * 1000);
 
-  // Balance — primary anchor at top
-  note(sw, "balance", 8);
-  sw.addSpacer(5);
-  digits(sw, fmtUSD(bal), 20, TEXT, true);
+  // Top: balance (left) | all-time PnL (right) — fills horizontal space
+  const topRow = sw.addStack();
+  topRow.layoutHorizontally();
 
-  sw.addSpacer(12);
+  const balCol = topRow.addStack(); balCol.layoutVertically();
+  note(balCol, "balance", 8);
+  balCol.addSpacer(4);
+  digits(balCol, fmtUSD(bal), 18, TEXT, true);
+
+  topRow.addSpacer();
+
+  const atCol = topRow.addStack(); atCol.layoutVertically();
+  note(atCol, "all-time", 8);
+  atCol.addSpacer(4);
+  digits(atCol, fmtPnL(allPnl), 13, pnlColor(allPnl), true);
+
+  sw.addSpacer(10);
 
   // Today PnL
   note(sw, "today", 8);
-  sw.addSpacer(5);
-  digits(sw, fmtPnL(pnl), 17, pnlColor(pnl), true);
+  sw.addSpacer(4);
+  digits(sw, fmtPnL(pnl), 20, pnlColor(pnl), true);
 
   // Timestamp pinned to bottom
   sw.addSpacer();
@@ -154,6 +165,13 @@ widget.backgroundColor = BG;
 widget.setPadding(14, 14, 12, 14);
 widget.refreshAfterDate = new Date(Date.now() + 2 * 60 * 1000);
 
+// Compute all-time return % for the sub-label
+const atBase   = inv > 0 ? inv : bal;
+const atRetPct = atBase > 0 ? (allPnl / atBase * 100) : null;
+const atRetStr = atRetPct != null
+  ? (atRetPct >= 0 ? "+" : "") + atRetPct.toFixed(1) + "%"
+  : "—";
+
 // ── Row 1: trader name left · timestamp right
 const rTop = widget.addStack();
 rTop.layoutHorizontally();
@@ -162,32 +180,28 @@ note(rTop, "DKTrading");
 rTop.addSpacer();
 note(rTop, stale ? "· stale  " + updAt : updAt, 9, stale ? AMBER : MUTED);
 
+widget.addSpacer(6);
+
+// ── Row 2: balance large (fills width)
+digits(widget, fmtUSD(bal), 28, TEXT, true);
+
+// ── Row 3: invested · all-time return — context under the balance
+const invLabel = inv > 0 ? fmtUSD(inv) + " invested" : "all-profit";
+note(widget, invLabel + "  ·  " + atRetStr + " return", 9, MUTED);
+
 widget.addSpacer(8);
 
-// ── Row 2: balance (large anchor) + invested (small, bottom-right)
-const rBal = widget.addStack();
-rBal.layoutHorizontally();
-rBal.bottomAlignContent();
-digits(rBal, fmtUSD(bal), 26, TEXT, true);
-rBal.addSpacer();
-const invStack = rBal.addStack();
-invStack.layoutVertically();
-note(invStack, "invested");
-digits(invStack, inv > 0 ? fmtUSD(inv) : "all-profit", 10, MUTED);
-
-widget.addSpacer(10);
-
-// ── Row 3: today PnL — the emotional center
+// ── Row 4: today PnL — the emotional center
 const rToday = widget.addStack();
 rToday.layoutHorizontally();
 rToday.centerAlignContent();
 note(rToday, "today  ");
-digits(rToday, fmtPnL(pnl), 20, pnlColor(pnl), true);
+digits(rToday, fmtPnL(pnl), 22, pnlColor(pnl), true);
 rToday.addSpacer();
 
-widget.addSpacer(10);
+widget.addSpacer(8);
 
-// ── Row 4: open · positions · all-time
+// ── Row 5: open · positions · all-time
 const rBtm = widget.addStack();
 rBtm.layoutHorizontally();
 rBtm.centerAlignContent();
