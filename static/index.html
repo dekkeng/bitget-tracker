@@ -603,20 +603,50 @@
       ctx.textAlign = 'center'; ctx.fillText('No history yet', w / 2, h / 2);
       return;
     }
-    const vals = history.map(d => d.cumulative_pnl);
+    const vals  = history.map(d => d.cumulative_pnl);
+    const dVals = history.map(d => d.pnl);  // daily PnL for bars
+
+    // Cumulative scale (left axis)
     const min = Math.min(...vals), max = Math.max(...vals), range = max - min || 1;
-    const pad = { top: 10, right: 8, bottom: 28, left: 52 };
+
+    // Daily PnL scale (right axis / bars) — symmetric around zero
+    const dAbsMax = Math.max(...dVals.map(v => Math.abs(v)), 0.01);
+
+    const pad = { top: 10, right: 34, bottom: 28, left: 52 };
     const pw = w - pad.left - pad.right, ph = h - pad.top - pad.bottom;
-    const xOf = i => pad.left + (i / (vals.length - 1)) * pw;
-    const yOf = v => pad.top + ph - ((v - min) / range) * ph;
+    const xOf  = i => pad.left + (i / (vals.length - 1)) * pw;
+    const yOf  = v => pad.top + ph - ((v - min) / range) * ph;
+
+    // Bar zero: share the cumulative zero line, clamped inside the plot area
+    const zeroY   = Math.max(pad.top + 1, Math.min(yOf(0), pad.top + ph - 1));
+    const barScale = (ph * 0.35) / dAbsMax;  // max bar height = 35% of plot height
+    const barW     = Math.max(2, (pw / vals.length) * 0.55);
 
     // Store state for hover redraws
-    canvas._state = { vals, min, max, pad, pw, ph, w, h, xOf, yOf, history };
+    canvas._state = { vals, dVals, min, max, pad, pw, ph, w, h, xOf, yOf, zeroY, barScale, barW, history };
 
+    // === Daily PnL bars — drawn first so line renders on top ===
+    for (let i = 0; i < vals.length; i++) {
+      const dv = dVals[i];
+      if (dv === 0) continue;
+      const x  = xOf(i);
+      const bH = Math.min(Math.abs(dv) * barScale, ph * 0.35);
+      ctx.globalAlpha = hoverIdx === i ? 0.65 : 0.28;
+      ctx.fillStyle = dv > 0 ? '#00c47a' : '#e84040';
+      if (dv > 0) {
+        ctx.fillRect(x - barW / 2, Math.max(zeroY - bH, pad.top), barW, bH);
+      } else {
+        ctx.fillRect(x - barW / 2, zeroY, barW, Math.min(bH, pad.top + ph - zeroY));
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // Zero baseline (dashed)
     ctx.strokeStyle = '#1c201c'; ctx.lineWidth = 1; ctx.setLineDash([2, 4]);
     ctx.beginPath(); ctx.moveTo(pad.left, yOf(0)); ctx.lineTo(pad.left + pw, yOf(0)); ctx.stroke();
     ctx.setLineDash([]);
 
+    // Cumulative PnL area + line
     const lastVal = vals[vals.length - 1];
     const color = lastVal >= 0 ? '#00c47a' : '#e84040';
     const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ph);
@@ -633,9 +663,18 @@
     for (let i = 1; i < vals.length; i++) ctx.lineTo(xOf(i), yOf(vals[i]));
     ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
 
-    // Y-axis labels
+    // Left y-axis labels (cumulative)
     ctx.fillStyle = '#4a5e4a'; ctx.font = '10px -apple-system,sans-serif'; ctx.textAlign = 'right';
     [min, (min + max) / 2, max].forEach(v => ctx.fillText('$' + v.toFixed(0), pad.left - 4, yOf(v) + 4));
+
+    // Right y-axis labels (daily PnL scale)
+    ctx.textAlign = 'left'; ctx.font = '9px -apple-system,sans-serif';
+    const rx = pad.left + pw + 3;
+    const topBarY = zeroY - dAbsMax * barScale;
+    const botBarY = zeroY + dAbsMax * barScale;
+    if (topBarY >= pad.top)       ctx.fillText('+$' + dAbsMax.toFixed(0), rx, topBarY + 3);
+    if (zeroY > pad.top + 6 && zeroY < pad.top + ph - 6) ctx.fillText('0', rx, zeroY + 3);
+    if (botBarY <= pad.top + ph)  ctx.fillText('-$' + dAbsMax.toFixed(0), rx, botBarY + 3);
 
     // X-axis ticks + labels every ~5 days
     const step = Math.ceil(vals.length / 6);
@@ -652,7 +691,7 @@
       ctx.fillText(history[i].date.slice(5), x, h - 3);
     });
 
-    // Dot on every data point
+    // Dots on every data point
     ctx.fillStyle = color;
     for (let i = 0; i < vals.length; i++) {
       ctx.beginPath(); ctx.arc(xOf(i), yOf(vals[i]), 1.5, 0, Math.PI * 2); ctx.fill();
