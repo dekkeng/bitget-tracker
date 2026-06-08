@@ -285,38 +285,105 @@ async def _active_poll(page, push_fn: Callable,
 
 
 async def _poll_cfd_history(page, push_fn: Callable, trader_name: str, pid: str):
+    """Fetch up to 30 days of closed position history, paginating as needed."""
+    cutoff_ms = (datetime.now(BKK) - timedelta(days=30)).timestamp() * 1000
+    all_rows: list = []
+    page_no = 1
+    PAGE_SIZE = 50
+    MAX_PAGES = 20  # safety cap (~1000 trades)
+
     try:
-        hist = await page.evaluate("""async (pid) => {
-            try {
-                const r = await fetch('/v1/trace/mt5/trace/positionHistory', {
-                    method: 'POST', credentials: 'include',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({portfolioId: pid, pageNo: 1, pageSize: 50}),
-                });
-                const text = await r.text();
-                if (text.trimStart().startsWith('<')) return {status: r.status, error: 'html_redirect'};
-                const j = JSON.parse(text);
-                return {status: r.status, data: j};
-            } catch(e) { return {status: 0, error: String(e)}; }
-        }""", pid)
-        api_code = (hist.get("data") or {}).get("code")
-        api_msg  = (hist.get("data") or {}).get("msg")
-        logger.info("CFD history[%s]: HTTP %s code=%s err=%s",
-                    trader_name, hist.get("status"), api_code, hist.get("error"))
-        _status["last_hist_response"] = {
-            "trader": trader_name, "type": "cfd",
-            "http": hist.get("status"), "code": api_code,
-            "msg": api_msg, "error": hist.get("error"),
-        }
-        if hist.get("status") == 200 and api_code in ("00000", "200", "0"):
+        while page_no <= MAX_PAGES:
+            hist = await page.evaluate("""async ([pid, pageNo, pageSize]) => {
+                try {
+                    const r = await fetch('/v1/trace/mt5/trace/positionHistory', {
+                        method: 'POST', credentials: 'include',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({portfolioId: pid, pageNo, pageSize}),
+                    });
+                    const text = await r.text();
+                    if (text.trimStart().startsWith('<')) return {status: r.status, error: 'html_redirect'};
+                    const j = JSON.parse(text);
+                    return {status: r.status, data: j};
+                } catch(e) { return {status: 0, error: String(e)}; }
+            }""", [pid, page_no, PAGE_SIZE])
+
+            api_code = (hist.get("data") or {}).get("code")
+            api_msg  = (hist.get("data") or {}).get("msg")
+
+            if page_no == 1:
+                logger.info("CFD history[%s]: HTTP %s code=%s err=%s",
+                            trader_name, hist.get("status"), api_code, hist.get("error"))
+                _status["last_hist_response"] = {
+                    "trader": trader_name, "type": "cfd",
+                    "http": hist.get("status"), "code": api_code,
+                    "msg": api_msg, "error": hist.get("error"),
+                }
+
+            if hist.get("error") == "html_redirect" or api_code == "00004":
+                _status["auth_ok"] = False
+                break
+
+            if hist.get("status") != 200 or api_code not in ("00000", "200", "0"):
+                break
+
             _status["auth_ok"] = True
-            push_fn("history", hist["data"], trader_name)
-        elif hist.get("error") == "html_redirect" or api_code == "00004":
-            # html_redirect = Cloudflare session expired
-            # 00004 = Bitget "Login expired, please re-log in"
-            _status["auth_ok"] = False
+            raw_data = hist.get("data") or {}
+            rows = _extract_rows(raw_data)
+            if not rows:
+                break
+
+            all_rows.extend(rows)
+
+            # Stop if we've reached trades older than 30 days
+            oldest = _oldest_close_ms(rows)
+            if oldest and oldest < cutoff_ms:
+                break
+
+            # Stop if this page was partial (last page)
+            if len(rows) < PAGE_SIZE:
+                break
+
+            page_no += 1
+
+        if all_rows:
+            logger.info("CFD history[%s]: %d trades across %d pages",
+                        trader_name, len(all_rows), page_no)
+            # Wrap in same structure the parser expects
+            push_fn("history", {"code": "200", "data": {"rows": all_rows}}, trader_name)
+
     except Exception as e:
         logger.warning("CFD history[%s] error: %s", trader_name, e)
+
+
+def _extract_rows(raw_data: dict) -> list:
+    """Pull the list of rows out of a Bitget history response."""
+    d = raw_data.get("data") or {}
+    if isinstance(d, list):
+        return d
+    if isinstance(d, dict):
+        return d.get("rows") or d.get("list") or d.get("data") or []
+    return []
+
+
+def _oldest_close_ms(rows: list) -> float | None:
+    """Return the close timestamp (ms) of the oldest trade in rows, or None."""
+    times = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        for key in ("closeTime", "closedAt", "closeTs", "ctime"):
+            v = r.get(key)
+            if v:
+                try:
+                    t = int(v)
+                    if 0 < t < 10_000_000_000:
+                        t *= 1000
+                    times.append(t)
+                    break
+                except (TypeError, ValueError):
+                    pass
+    return min(times) if times else None
 
 
 async def _poll_futures_history(page, push_fn: Callable, trader_name: str, pid: str):
