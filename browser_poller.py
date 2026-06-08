@@ -801,14 +801,34 @@ async def _fetch_cancelled_copies(page, push_fn: Callable):
         except Exception:
             pass
 
-    page.on("response", on_response)
+    # Also track ALL outgoing API requests (including failed) to find the real endpoint
+    page_requests: list[str] = []
+    page_failed:   list[str] = []
+
+    async def on_request(req):
+        url = req.url
+        if any(p in url for p in ("/v1/", "/api/v2/", "/api/v1/")):
+            page_requests.append(f"{req.method} {url.split('?')[0][-90:]}")
+
+    async def on_request_failed(req):
+        url = req.url
+        if any(p in url for p in ("/v1/", "/api/v2/", "/api/v1/")):
+            page_failed.append(f"{req.method} {url.split('?')[0][-90:]}")
+
+    page.on("response",       on_response)
+    page.on("request",        on_request)
+    page.on("requestfailed",  on_request_failed)
     try:
         await page.goto(f"{BITGET_BASE}/copy-trading/cfd-center/followers",
                         wait_until="domcontentloaded", timeout=30_000)
-        await asyncio.sleep(3)
+        # Wait for the React app to boot and fire its initial data fetches
+        try:
+            await page.wait_for_load_state("networkidle", timeout=12_000)
+        except Exception:
+            pass  # networkidle timeout is ok — just means page is still busy
+        await asyncio.sleep(2)
 
         # Click the "Canceled copy trades" tab using a JS DOM search
-        # (avoids fragile CSS selectors that depend on Bitget's class names)
         clicked_text = await page.evaluate("""() => {
             const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
             let node;
@@ -817,8 +837,7 @@ async def _fetch_cancelled_copies(page, push_fn: Callable):
                 const isLeafLike = node.children.length <= 3;
                 const isVisible = node.offsetParent !== null;
                 if (isLeafLike && isVisible &&
-                    (text.includes('Canceled') || text.includes('Cancelled') ||
-                     text.includes('Cancel'))) {
+                    (text.includes('Canceled') || text.includes('Cancelled'))) {
                     node.click();
                     return text.slice(0, 60);
                 }
@@ -827,19 +846,29 @@ async def _fetch_cancelled_copies(page, push_fn: Callable):
         }""")
         logger.info("Cancelled tab click result: %s", clicked_text)
         if clicked_text:
-            await asyncio.sleep(4)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=8_000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
         else:
             await asyncio.sleep(2)
     except Exception as e:
         logger.warning("Cancelled copies nav: %s", e)
     finally:
-        page.remove_listener("response", on_response)
+        page.remove_listener("response",      on_response)
+        page.remove_listener("request",       on_request)
+        page.remove_listener("requestfailed", on_request_failed)
 
     s2_probe = [{"ep": c["ep"], "rows": len(c["rows"]), "is_active": c.get("is_active"),
                  "row0_keys": c.get("r0_keys", [])[:15],
                  "url_path": "/" + "/".join(c["url"].split("?")[0].split("/")[3:])}
                 for c in captured]
-    _status["cancelled_copies_probe"] = {"strategy": "S2", "s1": s1_results, "s2": s2_probe}
+    _status["cancelled_copies_probe"] = {
+        "strategy": "S2", "s1": s1_results, "s2": s2_probe,
+        "page_requests": page_requests[-30:],
+        "page_failed":   page_failed[-20:],
+    }
 
     if not captured:
         logger.info("Cancelled copies: S2 captured nothing")
