@@ -665,7 +665,16 @@ def _extract_rows(data) -> list:
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        return data.get("rows") or data.get("list") or data.get("portfolioDetails") or []
+        # Direct keys first
+        direct = data.get("rows") or data.get("list") or data.get("portfolioDetails")
+        if direct:
+            return direct
+        # Unwrap one level: full API response {code, msg, data: {rows: [...]}}
+        inner = data.get("data")
+        if isinstance(inner, list):
+            return inner
+        if isinstance(inner, dict):
+            return inner.get("rows") or inner.get("list") or inner.get("portfolioDetails") or []
     return []
 
 
