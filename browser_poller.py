@@ -361,45 +361,12 @@ async def _poll_cfd_history(page, push_fn: Callable, trader_name: str, pid: str)
             end_time_ms = oldest - 1
 
         if all_rows:
-            logger.info("CFD history[%s]: %d trades across %d batches, oldest=%s",
-                        trader_name, len(all_rows), batch + 1,
-                        datetime.fromtimestamp(
-                            (_oldest_close_ms(all_rows) or 0) / 1000, tz=BKK
-                        ).strftime("%Y-%m-%d") if all_rows else "?")
+            logger.info("CFD history[%s]: %d trades across %d batches",
+                        trader_name, len(all_rows), batch + 1)
             push_fn("history", {"code": "200", "data": {"rows": all_rows}}, trader_name)
 
     except Exception as e:
         logger.warning("CFD history[%s] error: %s", trader_name, e)
-
-
-def _extract_rows(raw_data: dict) -> list:
-    """Pull the list of rows out of a Bitget history response."""
-    d = raw_data.get("data") or {}
-    if isinstance(d, list):
-        return d
-    if isinstance(d, dict):
-        return d.get("rows") or d.get("list") or d.get("data") or []
-    return []
-
-
-def _oldest_close_ms(rows: list) -> float | None:
-    """Return the close timestamp (ms) of the oldest trade in rows, or None."""
-    times = []
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        for key in ("closeTime", "closedAt", "closeTs", "ctime"):
-            v = r.get(key)
-            if v:
-                try:
-                    t = int(v)
-                    if 0 < t < 10_000_000_000:
-                        t *= 1000
-                    times.append(t)
-                    break
-                except (TypeError, ValueError):
-                    pass
-    return min(times) if times else None
 
 
 async def _poll_futures_history(page, push_fn: Callable, trader_name: str, pid: str):
@@ -467,6 +434,7 @@ async def _fetch_balance(page, push_fn: Callable,
 
     if cfd_traders:
         await _fetch_cfd_balances(page, push_fn, cfd_traders)
+        await _fetch_cancelled_copies(page, push_fn)
 
     for trader_name, pid in fut_traders.items():
         await _fetch_futures_balance(page, push_fn, trader_name, pid)
@@ -682,3 +650,70 @@ async def _fetch_futures_fund_flow(page, push_fn: Callable, trader_name: str, pi
             _status["auth_ok"] = False
     except Exception as e:
         logger.warning("Futures fund_flow[%s] error: %s", trader_name, e)
+
+
+# ── Cancelled copy portfolios ─────────────────────────────────────────────────
+
+# Fields unique to cancelled copy summary rows (not present in active portfolios)
+_CANCEL_KEYS = {"netProfit", "estNetProfit", "stopTime", "cancelTime",
+                "traderNickName", "profitSharingAmount", "copyProfit", "cancelReason"}
+# Fields that indicate active/live portfolio data — if present, row is NOT a cancelled copy
+_ACTIVE_KEYS = {"marginCall", "marginFree", "credit", "connecting"}
+
+
+def _extract_rows(data) -> list:
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        return data.get("rows") or data.get("list") or data.get("portfolioDetails") or []
+    return []
+
+
+async def _fetch_cancelled_copies(page, push_fn: Callable):
+    """Probe for cancelled CFD copy portfolios (account-level, no navigation).
+
+    getFollowPortfolios ignores all status/filter params — always returns active
+    portfolios. Kept as fast probes in case Bitget ever adds a real filter param.
+
+    The real cancelled-copies endpoint lives behind a lazy tab click on
+    /cfd-center/followers and hasn't been captured yet. Use the manual override:
+    POST /api/settings {"cancelled_copy_pnl": <value>}
+    """
+    probes = [
+        {"followStatus": 3},
+        {"followStatus": "closed"},
+        {"status": "CLOSED"},
+    ]
+    results = []
+    for body in probes:
+        try:
+            result = await page.evaluate("""async (body) => {
+                try {
+                    const r = await fetch('/v1/trace/mt5/trace/getFollowPortfolios', {
+                        method: 'POST', credentials: 'include',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(body),
+                    });
+                    const text = await r.text();
+                    if (text.trimStart().startsWith('<')) return {status: r.status, error: 'html_redirect'};
+                    const j = JSON.parse(text);
+                    const rows = j?.data?.portfolioDetails || j?.data?.rows || j?.data?.list || [];
+                    return {status: r.status, code: j?.code, rows: rows.length,
+                            row0_keys: rows[0] ? Object.keys(rows[0]).slice(0, 12) : null,
+                            data: j?.data};
+                } catch(e) { return {status: 0, error: String(e)}; }
+            }""", body)
+            code = result.get("code") if isinstance(result, dict) else None
+            results.append({"body": str(body), "http": result.get("status"),
+                            "code": code, "rows": result.get("rows")})
+            if result.get("status") == 200 and code in ("00000", "200", "0"):
+                rows = _extract_rows(result.get("data"))
+                if rows and not any(k in rows[0] for k in _ACTIVE_KEYS):
+                    if _CANCEL_KEYS & set(rows[0].keys()):
+                        logger.info("Cancelled copies: %d entries body=%s", len(rows), body)
+                        push_fn("cancelled_copies", rows)
+                        _status["cancelled_copies_probe"] = {"strategy": "S1", "results": results}
+                        return
+        except Exception as e:
+            results.append({"body": str(body), "error": str(e)})
+    _status["cancelled_copies_probe"] = results

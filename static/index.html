@@ -556,6 +556,7 @@
         <span style="display:inline-flex;align-items:center;gap:5px;flex-wrap:nowrap">
           <span id="alltime-badge" class="trend-badge flat" style="display:none" title="Realized P&L ÷ invested · closed trades only · excludes open positions"></span><span id="alltime-badge-label" style="display:none;font-size:9px;color:var(--muted);letter-spacing:0.3px;white-space:nowrap">invested return</span>
         </span>
+        <div id="cancelled-copies-note" style="display:none;font-size:9px;color:var(--muted);margin-top:3px;letter-spacing:0.3px"></div>
       </div>
     </div>
 
@@ -1132,6 +1133,16 @@
       } else {
         document.getElementById('alltime-badge').style.display = 'none';
         document.getElementById('alltime-badge-label').style.display = 'none';
+      }
+
+      const ccNote = document.getElementById('cancelled-copies-note');
+      const ccPnl = mt5.cancelled_copy_pnl;
+      const ccCount = mt5.cancelled_copy_count;
+      if (ccPnl != null && Math.abs(ccPnl) >= 0.01 && ccCount > 0) {
+        ccNote.textContent = `incl. ${fmt(ccPnl)} from ${ccCount} stopped cop${ccCount === 1 ? 'y' : 'ies'}`;
+        ccNote.style.display = '';
+      } else {
+        ccNote.style.display = 'none';
       }
 
       renderPositions(positions);
