@@ -295,8 +295,8 @@ async def _poll_cfd_history(page, push_fn: Callable, trader_name: str, pid: str)
     cutoff_ms = int((datetime.now(BKK) - timedelta(days=30)).timestamp() * 1000)
     all_rows: list = []
     end_time_ms: int | None = None   # None = no filter (get latest batch first)
-    PAGE_SIZE = 50
-    MAX_BATCHES = 25  # safety cap (~1250 trades / 30 days)
+    PAGE_SIZE = 200
+    MAX_BATCHES = 25  # safety cap (~5000 trades / 30 days)
 
     try:
         for batch in range(MAX_BATCHES):

@@ -23,6 +23,7 @@ SETTINGS_FILE    = Path(os.environ.get("SETTINGS_PATH", "settings.json"))
 COOKIES_FILE     = Path(os.environ.get("COOKIES_PATH", "cookies.json"))
 TRADERS_FILE     = Path(os.environ.get("TRADERS_PATH", "traders.json"))
 CREDENTIALS_FILE = Path(os.environ.get("CREDENTIALS_PATH", "credentials.json"))
+HISTORY_FILE     = Path(os.environ.get("HISTORY_PATH", "history.json"))
 
 _BALANCE_PATS = ("balance", "equity", "totalbal", "totalequity",
                  "totalasset", "accountval", "worth", "asset")
@@ -116,6 +117,31 @@ if "traders" not in _settings:
     _settings["traders"] = {}
 
 
+def _load_history() -> dict[str, list]:
+    """Load persisted trade rows from history.json, keyed by trader name."""
+    if HISTORY_FILE.exists():
+        try:
+            return json.loads(HISTORY_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_history(trader: str, rows: list) -> None:
+    """Persist accumulated trade rows for one trader to disk."""
+    try:
+        data: dict = {}
+        if HISTORY_FILE.exists():
+            try:
+                data = json.loads(HISTORY_FILE.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+        data[trader] = rows
+        HISTORY_FILE.write_text(json.dumps(data))
+    except OSError as e:
+        logger.warning("Could not save history.json: %s", e)
+
+
 # ── Per-trader in-memory cache ────────────────────────────────────────────────
 
 _traders_cache: dict[str, dict] = {}
@@ -123,14 +149,18 @@ _traders_cache: dict[str, dict] = {}
 
 def _tc(name: str) -> dict:
     if name not in _traders_cache:
+        persisted = _load_history().get(name, [])
+        history_raw = {"code": "200", "data": {"rows": persisted}} if persisted else None
         _traders_cache[name] = {
             "positions_raw": None,
-            "history_raw": None,
+            "history_raw": history_raw,
             "summary": None,
             "trades": None,
             "history": None,
             "pushed_at": None,
         }
+        if persisted:
+            logger.info("Seeded history[%s] from disk: %d rows", name, len(persisted))
     return _traders_cache[name]
 
 
@@ -382,6 +412,7 @@ def _push_data(kind: str, data, trader: str = None):
                 return cutoff_ms + 1  # keep if unknown
             merged = [r for r in merged if _close_ms(r) > cutoff_ms]
             tc["history_raw"] = {"code": "200", "data": {"rows": merged}}
+            _save_history(trader, merged)
             logger.info("History[%s]: merged %d new + kept old → %d total rows",
                         trader, len(new_rows), len(merged))
         else:
