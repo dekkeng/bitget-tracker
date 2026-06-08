@@ -423,6 +423,15 @@ def _push_data(kind: str, data, trader: str = None):
             # Log all keys on first push so we can diagnose field names
             if not ts.get("_copy_detail_keys"):
                 ts["_copy_detail_keys"] = list(data.keys())[:20]
+            # Open position count from portfolio details
+            for key in ("openPositionNum", "openPositionCount", "positionCount",
+                        "holdNum", "followOpenPositionNum", "openNum", "openCount"):
+                if key in data:
+                    try:
+                        ts["open_position_count"] = int(data[key])
+                    except (TypeError, ValueError):
+                        pass
+                    break
             if changed:
                 _save_settings(_settings)
     elif kind == "fund_flow":
@@ -494,6 +503,11 @@ def _rebuild_trader_summary(name: str) -> dict:
     else:
         balance = scraped_balance
 
+    # Open position count: prefer explicit API field; fall back to 1 if PnL is non-zero
+    open_pos_count = ts.get("open_position_count", 0)
+    if open_pos_count == 0 and open_pnl != 0:
+        open_pos_count = 1  # we know there's at least one
+
     summary = {
         "name": name,
         "type": _trader_type(name),
@@ -503,6 +517,7 @@ def _rebuild_trader_summary(name: str) -> dict:
         "daily_pnl": round(daily_pnl, 4),
         "all_time_pnl": round(all_time_pnl, 4),
         "open_positions_pnl": open_pnl,
+        "open_position_count": open_pos_count,
         "pushed_at": tc["pushed_at"],
         "has_data": tc["history_raw"] is not None or scraped_balance > 0 or investment > 0,
     }
@@ -519,6 +534,7 @@ def _rebuild_summary() -> None:
     total_daily_pnl = 0.0
     total_all_time_pnl = 0.0
     total_open_pnl = 0.0
+    total_open_count = 0
 
     for name in _trader_names():
         s = _rebuild_trader_summary(name)
@@ -528,11 +544,13 @@ def _rebuild_summary() -> None:
         total_daily_pnl += s["daily_pnl"]
         total_all_time_pnl += s["all_time_pnl"]
         total_open_pnl += s["open_positions_pnl"]
+        total_open_count += s.get("open_position_count", 0)
 
-    # Open positions from the global probe (fallback: sum from portfolio details)
+    # Open positions from the global probe; fall back to per-trader portfolio counts
     all_positions = _parse_positions(_mt5["positions_raw"])
     if all_positions:
         total_open_pnl = sum(p["unrealized_pnl"] for p in all_positions)
+        total_open_count = len(all_positions)
 
     # If API investment is available and positive, use it as the authoritative total
     if _investment.get("data") and _investment["data"].get("net", 0) > 0:
@@ -540,7 +558,7 @@ def _rebuild_summary() -> None:
 
     _mt5["summary"] = {
         "daily_pnl": round(total_daily_pnl, 4),
-        "open_positions": len(all_positions),
+        "open_positions": total_open_count,
         "open_positions_pnl": round(total_open_pnl, 4),
         "all_time_pnl": round(total_all_time_pnl, 4),
         "total_balance": round(total_balance, 2),
