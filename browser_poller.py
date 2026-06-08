@@ -703,30 +703,22 @@ def _extract_rows(data) -> list:
 
 
 async def _fetch_cancelled_copies(page, push_fn: Callable):
-    """Fetch cancelled CFD copy portfolios for all-time PnL.
+    """Probe for cancelled CFD copy portfolios (account-level, no navigation).
 
-    Strategy 1 (no extra navigation): call getFollowPortfolios with various
-    status-filter bodies — if Bitget uses the same endpoint with a status param,
-    this works without any page navigation.
+    getFollowPortfolios ignores all status/filter params — always returns active
+    portfolios. Kept as fast probes in case Bitget ever adds a real filter param.
 
-    Strategy 2 (navigate + intercept): navigate to /cfd-center/followers and
-    capture the API responses the page itself makes. Click the "Canceled" tab
-    to trigger its data load, then read the captured rows.
+    The real cancelled-copies endpoint lives behind a lazy tab click on
+    /cfd-center/followers and hasn't been captured yet. Use the manual override:
+    POST /api/settings {"cancelled_copy_pnl": <value>}
     """
-    # ── Strategy 1: status-filter probes on the known-working endpoint ────────
-    # followStatus 2 = actively copying (NOT cancelled). Try 3, 4, 5 for stopped/closed.
-    status_bodies = [
+    probes = [
         {"followStatus": 3},
-        {"followStatus": 4},
-        {"followStatus": 5},
-        {"followStatus": "3"},
         {"followStatus": "closed"},
-        {"status": 3},
         {"status": "CLOSED"},
-        {"status": "STOP"},
     ]
-    s1_results = []
-    for body in status_bodies:
+    results = []
+    for body in probes:
         try:
             result = await page.evaluate("""async (body) => {
                 try {
@@ -740,158 +732,21 @@ async def _fetch_cancelled_copies(page, push_fn: Callable):
                     const j = JSON.parse(text);
                     const rows = j?.data?.portfolioDetails || j?.data?.rows || j?.data?.list || [];
                     return {status: r.status, code: j?.code, rows: rows.length,
-                            row0_keys: rows[0] ? Object.keys(rows[0]).slice(0, 15) : null,
+                            row0_keys: rows[0] ? Object.keys(rows[0]).slice(0, 12) : null,
                             data: j?.data};
                 } catch(e) { return {status: 0, error: String(e)}; }
             }""", body)
             code = result.get("code") if isinstance(result, dict) else None
-            s1_results.append({"body": str(body), "http": result.get("status"),
-                                "code": code, "rows": result.get("rows"),
-                                "row0_keys": result.get("row0_keys"), "error": result.get("error")})
-            logger.info("Cancelled S1 body=%s: HTTP %s code=%s rows=%s err=%s",
-                        body, result.get("status"), code, result.get("rows"), result.get("error"))
+            results.append({"body": str(body), "http": result.get("status"),
+                            "code": code, "rows": result.get("rows")})
             if result.get("status") == 200 and code in ("00000", "200", "0"):
                 rows = _extract_rows(result.get("data"))
-                if not rows:
-                    continue
-                r0 = rows[0]
-                # Skip if this looks like active portfolio data (has live margin fields)
-                if any(k in r0 for k in _ACTIVE_KEYS):
-                    logger.info("Cancelled S1 body=%s: active portfolio data, skipping", body)
-                    continue
-                # Accept if rows have cancelled-copy-specific fields
-                if _CANCEL_KEYS & set(r0.keys()):
-                    logger.info("Cancelled copies via status filter: %d entries body=%s", len(rows), body)
-                    push_fn("cancelled_copies", rows)
-                    _status["cancelled_copies_probe"] = {"strategy": "S1", "results": s1_results}
-                    return
+                if rows and not any(k in rows[0] for k in _ACTIVE_KEYS):
+                    if _CANCEL_KEYS & set(rows[0].keys()):
+                        logger.info("Cancelled copies: %d entries body=%s", len(rows), body)
+                        push_fn("cancelled_copies", rows)
+                        _status["cancelled_copies_probe"] = {"strategy": "S1", "results": results}
+                        return
         except Exception as e:
-            s1_results.append({"body": str(body), "error": str(e)})
-
-    # ── Strategy 2: navigate + response interception ──────────────────────────
-    # Broad capture: any Bitget API response (not just known MT5 paths)
-    captured: list[dict] = []
-
-    async def on_response(response):
-        url = response.url
-        if response.status != 200:
-            return
-        # Catch any /v1/ or /api/v2/ JSON endpoint — cancelled copies may be on a path
-        # we haven't guessed yet
-        if not any(p in url for p in ("/v1/", "/api/v2/")):
-            return
-        if any(url.endswith(ext) for ext in (".js", ".css", ".png", ".jpg", ".svg", ".woff")):
-            return
-        try:
-            text = await response.text()
-            if not text.strip().startswith("{"):
-                return
-            j = json.loads(text)
-            if j.get("code") not in ("00000", "200", "0"):
-                return
-            inner = j.get("data")
-            rows = _extract_rows(inner) if inner else []
-            ep = url.split("?")[0].split("/")[-1]
-            r0_keys = list(rows[0].keys())[:15] if (rows and isinstance(rows[0], dict)) else []
-            is_active = bool(_ACTIVE_KEYS & set(r0_keys)) if r0_keys else None
-            logger.info("Nav-captured %s: rows=%d is_active=%s keys=%s",
-                        ep, len(rows), is_active, r0_keys[:8])
-            captured.append({"ep": ep, "url": url, "rows": rows,
-                              "is_active": is_active, "r0_keys": r0_keys})
-        except Exception:
-            pass
-
-    # Also track ALL outgoing API requests (including failed) to find the real endpoint
-    page_requests: list[str] = []
-    page_failed:   list[str] = []
-
-    async def on_request(req):
-        url = req.url
-        if any(p in url for p in ("/v1/", "/api/v2/", "/api/v1/")):
-            page_requests.append(f"{req.method} {url.split('?')[0][-90:]}")
-
-    async def on_request_failed(req):
-        url = req.url
-        if any(p in url for p in ("/v1/", "/api/v2/", "/api/v1/")):
-            page_failed.append(f"{req.method} {url.split('?')[0][-90:]}")
-
-    page.on("response",       on_response)
-    page.on("request",        on_request)
-    page.on("requestfailed",  on_request_failed)
-    try:
-        await page.goto(f"{BITGET_BASE}/copy-trading/cfd-center/followers",
-                        wait_until="domcontentloaded", timeout=30_000)
-        # Wait for the React app to boot and fire its initial data fetches
-        try:
-            await page.wait_for_load_state("networkidle", timeout=12_000)
-        except Exception:
-            pass  # networkidle timeout is ok — just means page is still busy
-        await asyncio.sleep(2)
-
-        # Click the "Canceled copy trades" tab using a JS DOM search
-        clicked_text = await page.evaluate("""() => {
-            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-            let node;
-            while ((node = walker.nextNode())) {
-                const text = node.textContent?.trim() || '';
-                const isLeafLike = node.children.length <= 3;
-                const isVisible = node.offsetParent !== null;
-                if (isLeafLike && isVisible &&
-                    (text.includes('Canceled') || text.includes('Cancelled'))) {
-                    node.click();
-                    return text.slice(0, 60);
-                }
-            }
-            return null;
-        }""")
-        logger.info("Cancelled tab click result: %s", clicked_text)
-        if clicked_text:
-            try:
-                await page.wait_for_load_state("networkidle", timeout=8_000)
-            except Exception:
-                pass
-            await asyncio.sleep(2)
-        else:
-            await asyncio.sleep(2)
-    except Exception as e:
-        logger.warning("Cancelled copies nav: %s", e)
-    finally:
-        page.remove_listener("response",      on_response)
-        page.remove_listener("request",       on_request)
-        page.remove_listener("requestfailed", on_request_failed)
-
-    s2_probe = [{"ep": c["ep"], "rows": len(c["rows"]), "is_active": c.get("is_active"),
-                 "row0_keys": c.get("r0_keys", [])[:15],
-                 "url_path": "/" + "/".join(c["url"].split("?")[0].split("/")[3:])}
-                for c in captured]
-    _status["cancelled_copies_probe"] = {
-        "strategy": "S2", "s1": s1_results, "s2": s2_probe,
-        "page_requests": page_requests[-30:],
-        "page_failed":   page_failed[-20:],
-    }
-
-    if not captured:
-        logger.info("Cancelled copies: S2 captured nothing")
-        return
-
-    # Prefer rows that have cancelled-copy-specific fields and no active-portfolio fields
-    best = None
-    for c in reversed(captured):
-        r0 = c["rows"][0] if c["rows"] else {}
-        if _ACTIVE_KEYS & set(r0.keys()):
-            continue  # Skip active portfolio data
-        if _CANCEL_KEYS & set(r0.keys()):
-            best = c
-            break
-    # Fallback: last captured that isn't active portfolio data
-    if best is None:
-        for c in reversed(captured):
-            r0 = c["rows"][0] if c["rows"] else {}
-            if not (_ACTIVE_KEYS & set(r0.keys())):
-                best = c
-                break
-    if best is None and captured:
-        best = captured[-1]
-
-    logger.info("Cancelled copies S2: %d entries from %s", len(best["rows"]), best["ep"])
-    push_fn("cancelled_copies", best["rows"])
+            results.append({"body": str(body), "error": str(e)})
+    _status["cancelled_copies_probe"] = results
