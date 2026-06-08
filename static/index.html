@@ -1110,10 +1110,12 @@
       }
 
       const posCount = mt5.open_positions ?? 0;
-      document.getElementById('open-count').textContent = posCount;
+      const hasOpenPnl = mt5.open_positions_pnl != null && mt5.open_positions_pnl !== 0;
+      // Show '?' when PnL indicates positions exist but exact count isn't known yet
+      document.getElementById('open-count').textContent = posCount > 0 ? posCount : (hasOpenPnl ? '?' : '0');
       const pb = document.getElementById('positions-badge');
-      pb.textContent = posCount > 0 ? '● Active' : '○ None';
-      pb.className = 'trend-badge ' + (posCount > 0 ? 'up' : 'flat');
+      pb.textContent = (posCount > 0 || hasOpenPnl) ? '● Active' : '○ None';
+      pb.className = 'trend-badge ' + ((posCount > 0 || hasOpenPnl) ? 'up' : 'flat');
       pb.style.display = 'inline-flex';
 
       const atEl = document.getElementById('all-time-pnl');

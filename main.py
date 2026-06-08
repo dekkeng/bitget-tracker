@@ -403,7 +403,7 @@ def _push_data(kind: str, data, trader: str = None):
             # (equity = balance + profit). We also fall back to equity - balance.
             open_pnl_found = False
             for key in ("floatProfit", "floatingProfit", "unrealizedPnl", "openPnl",
-                        "unrealizedPL", "upl", "floatPL", "profit"):
+                        "unrealizedPL", "upl", "floatPL", "profit", "pnl"):
                 if key in data:
                     try:
                         ts["open_pnl"] = round(float(data[key]), 2)

@@ -219,37 +219,54 @@ async def _active_poll(page, push_fn: Callable,
                        traders: dict[str, str], trader_types: dict[str, str]):
     logger.info("Polling APIs via page.evaluate... traders=%s", list(traders.keys()))
 
-    # CFD open-positions probe (usually 403; kept for discovery)
+    # CFD open-positions probe — try multiple endpoints and body variants
     cfd_pids = [p for n, p in traders.items() if trader_types.get(n, "cfd") == "cfd"]
     if cfd_pids:
         pid0 = cfd_pids[0]
         pos_probes = []
-        for label, body in [("empty", {}), ("portfolioId", {"portfolioId": pid0}),
-                             ("followId", {"followPortfolioId": pid0})]:
-            try:
-                result = await page.evaluate("""async ([body]) => {
-                    try {
-                        const r = await fetch('/v1/trace/mt5/trace/getFollowOpenPosition', {
-                            method: 'POST', credentials: 'include',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify(body),
-                        });
-                        const text = await r.text();
-                        if (text.trimStart().startsWith('<')) return {status: r.status, error: 'html_redirect'};
-                        const j = JSON.parse(text);
-                        return {status: r.status, code: j?.code, msg: j?.msg,
-                                data_keys: j?.data != null ? Object.keys(Object(j.data)).slice(0,8) : null};
-                    } catch(e) { return {status: 0, error: String(e)}; }
-                }""", [body])
-                code = result.get("code") if isinstance(result, dict) else None
-                pos_probes.append({"body": label, "status": result.get("status"),
-                                   "code": code, "error": result.get("error")})
-                if isinstance(result, dict) and result.get("status") == 200 and code in ("00000", "200", "0"):
-                    logger.info("CFD positions found body=%s", label)
-                    push_fn("positions", result.get("data") or {})
-                    break
-            except Exception as ex:
-                pos_probes.append({"body": label, "error": str(ex)})
+        pos_found = False
+        for ep in [
+            "/v1/trace/mt5/trace/getFollowOpenPosition",
+            "/v1/trace/mt5/data/tracePosition",
+            "/v1/trace/mt5/trace/myFollowOpenPosition",
+            "/v1/trace/mt5/trace/getFollowOpenOrder",
+        ]:
+            if pos_found:
+                break
+            for label, body in [("portfolioId", {"portfolioId": pid0}),
+                                 ("followId", {"followPortfolioId": pid0}),
+                                 ("empty", {})]:
+                try:
+                    result = await page.evaluate("""async ([ep, body]) => {
+                        try {
+                            const r = await fetch(ep, {
+                                method: 'POST', credentials: 'include',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify(body),
+                            });
+                            const text = await r.text();
+                            if (text.trimStart().startsWith('<')) return {status: r.status, error: 'html_redirect'};
+                            const j = JSON.parse(text);
+                            const d = j?.data;
+                            const rows = Array.isArray(d) ? d : (d?.list || d?.rows || d?.positions || []);
+                            return {status: r.status, code: j?.code, msg: j?.msg,
+                                    data_type: Array.isArray(d) ? 'array' : typeof d,
+                                    data_keys: d != null ? Object.keys(Object(d)).slice(0,8) : null,
+                                    row_count: rows.length};
+                        } catch(e) { return {status: 0, error: String(e)}; }
+                    }""", [ep, body])
+                    code = result.get("code") if isinstance(result, dict) else None
+                    pos_probes.append({"ep": ep, "body": label, "status": result.get("status"),
+                                       "code": code, "rows": result.get("row_count"),
+                                       "error": result.get("error")})
+                    if isinstance(result, dict) and result.get("status") == 200 and code in ("00000", "200", "0"):
+                        logger.info("CFD positions found ep=%s body=%s rows=%s",
+                                    ep, label, result.get("row_count"))
+                        push_fn("positions", result.get("data") or {})
+                        pos_found = True
+                        break
+                except Exception as ex:
+                    pos_probes.append({"ep": ep, "body": label, "error": str(ex)})
         _status["last_pos_response"] = pos_probes[0] if pos_probes else {}
         _status["last_pos_probes"] = pos_probes
 
