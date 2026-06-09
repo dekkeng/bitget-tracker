@@ -513,13 +513,6 @@
               </div>
             </div>
           </div>
-          <!-- Earn balance row — shown only when API credentials set and earn > 0 -->
-          <div id="earn-section" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
-            <div style="display:flex;align-items:center;justify-content:space-between">
-              <span style="font-size:10px;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);font-weight:600">Earn</span>
-              <div id="earn-balance" style="font-family:var(--mono);font-size:15px;font-weight:700;color:var(--green)">—</div>
-            </div>
-          </div>
         </div>
         <!-- Goal ring — tap to configure -->
         <div class="goal-ring-wrap" id="goal-ring-wrap" onclick="openSettings()" title="Tap to set goal" style="display:none">
@@ -595,6 +588,27 @@
         <button class="manage-btn" onclick="openTradersModal()">+ Manage</button>
       </div>
       <div id="traders-cards"></div>
+    </div>
+
+    <!-- Earn card — same style as trader rows -->
+    <div id="earn-section" style="display:none;border-top:1px solid var(--border)">
+      <div class="trader-row">
+        <div>
+          <div class="trader-name-row">
+            <span class="trader-name">Earn</span>
+            <span class="type-badge cfd">FLEXIBLE</span>
+          </div>
+          <div class="trader-metrics">
+            <div>
+              <div class="trader-metric-label">Balance</div>
+              <div class="trader-metric-val green" id="earn-balance">—</div>
+            </div>
+          </div>
+        </div>
+        <div class="trader-right">
+          <div class="trader-alltime-label">USDT</div>
+        </div>
+      </div>
     </div>
 
   </div>
