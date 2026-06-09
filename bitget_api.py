@@ -238,119 +238,128 @@ async def fetch_net_investment(api_key: str, secret: str, passphrase: str,
     }
 
 
+def _parse_earn_apr(it: dict) -> float | None:
+    """Extract APR % from an earn position dict, normalising decimal vs percent."""
+    for f in ("annualInterestRate", "interestRate", "apr", "apy",
+              "annualRate", "rate", "profitRate", "currentRate",
+              "yearRate", "annualYield", "currentApr"):
+        v = it.get(f)
+        if v not in (None, ""):
+            try:
+                fv = float(v)
+                # Bitget sometimes returns decimal (0.05) sometimes percent (5.0)
+                return fv if fv > 1 else fv * 100
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
 async def fetch_earn_balance(api_key: str, secret: str, passphrase: str) -> dict:
     """
-    Return earn (savings/flexible) balance and weighted APR across all earn positions.
+    Return earn (savings/flexible) balance and weighted APR.
 
-    Tries multiple Bitget v2 earn endpoints in order and records each attempt
-    in _probes for diagnostics.
+    Strategy:
+    1. GET /api/v2/earn/savings/assets  → data.resultList (per-position with APR)
+    2. GET /api/v2/earn/savings/account → flat totals + 24h earnings for APR estimate
     """
     async with httpx.AsyncClient(timeout=30) as client:
-        candidates = [
-            "/api/v2/earn/savings/assets",
-            "/api/v2/earn/account",
-            "/api/v2/earn/savings/account",
-            "/api/v2/earn/savings/hold",
-            "/api/v2/financial/savings/hold",
-            "/api/v2/earn/savings/current-position",
-        ]
         probes: list[dict] = []
-        for path in candidates:
-            hdrs = _auth_headers("GET", path, "", api_key, secret, passphrase)
-            try:
-                r = await client.get(BITGET_API_BASE + path, headers=hdrs)
-                body = r.json()
-            except Exception as exc:
-                logger.warning("Earn API %s: %s", path, exc)
-                probes.append({"path": path, "error": str(exc)})
-                continue
 
+        # ── 1. Per-position detail ────────────────────────────────────────────
+        path_assets = "/api/v2/earn/savings/assets"
+        hdrs = _auth_headers("GET", path_assets, "", api_key, secret, passphrase)
+        try:
+            r = await client.get(BITGET_API_BASE + path_assets, headers=hdrs)
+            body = r.json()
             code = str(body.get("code", ""))
-            msg = body.get("msg", "")
-            data_preview = str(body.get("data", ""))[:120]
-            probes.append({"path": path, "http": r.status_code, "code": code,
-                           "msg": msg, "data_preview": data_preview})
-            if code not in ("00000", "0", "200"):
-                logger.info("Earn API %s: code=%s msg=%s", path, code, msg)
-                continue
-
             data = body.get("data") or {}
-            items: list[dict] = []
-            if isinstance(data, list):
-                items = data
-            elif isinstance(data, dict):
-                items = (data.get("list") or data.get("assets") or
-                         data.get("rows") or data.get("data") or [])
-                # Flat summary: {totalAmount, ...}
-                if not items and data.get("totalAmount") is not None:
-                    total = 0.0
-                    try:
-                        total = float(data["totalAmount"])
-                    except (TypeError, ValueError):
-                        pass
-                    return {"total": round(total, 2), "items": [], "apr": None,
-                            "source": path, "error": None}
+            data_keys = list(data.keys()) if isinstance(data, dict) else type(data).__name__
+            probes.append({"path": path_assets, "http": r.status_code,
+                           "code": code, "msg": body.get("msg"), "data_keys": data_keys})
 
-            if not items:
-                continue
+            if code in ("00000", "0", "200") and isinstance(data, dict):
+                # resultList is the confirmed key name from probe diagnostics
+                items = (data.get("resultList") or data.get("list") or
+                         data.get("assets") or data.get("rows") or [])
+                parsed = []
+                for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    coin = str(it.get("productCoin") or it.get("coinName") or
+                               it.get("coin") or "")
+                    amt = 0.0
+                    for f in ("holdAmount", "amount", "totalAmount", "principal",
+                              "holdingAmount", "currentAmount", "holdSize"):
+                        v = it.get(f)
+                        if v not in (None, "", "0", 0):
+                            try:
+                                amt = float(v); break
+                            except (TypeError, ValueError):
+                                pass
+                    if amt <= 0:
+                        continue
+                    apr = _parse_earn_apr(it)
+                    parsed.append({"coin": coin, "amount": round(amt, 4), "apr": apr})
 
-            parsed = []
-            for it in items:
-                if not isinstance(it, dict):
-                    continue
-                coin = str(it.get("coinName") or it.get("coin") or it.get("currency") or "")
-                # Amount / principal
-                amt = 0.0
-                for f in ("holdAmount", "amount", "totalAmount", "principal",
-                          "holdingAmount", "currentAmount"):
-                    v = it.get(f)
-                    if v not in (None, "", "0", 0):
+                if parsed:
+                    total = sum(p["amount"] for p in parsed)
+                    apr_items = [p for p in parsed if p["apr"] is not None]
+                    weighted_apr = None
+                    if apr_items:
+                        w = sum(p["amount"] for p in apr_items)
+                        if w > 0:
+                            weighted_apr = round(
+                                sum(p["amount"] * p["apr"] for p in apr_items) / w, 2)
+                    logger.info("Earn[assets]: total=%.2f items=%d apr=%s",
+                                total, len(parsed), weighted_apr)
+                    return {"total": round(total, 2), "items": parsed,
+                            "apr": weighted_apr, "source": path_assets,
+                            "error": None, "_probes": probes}
+        except Exception as exc:
+            probes.append({"path": path_assets, "error": str(exc)})
+            logger.warning("Earn API %s: %s", path_assets, exc)
+
+        # ── 2. Account summary fallback ───────────────────────────────────────
+        path_acct = "/api/v2/earn/savings/account"
+        hdrs = _auth_headers("GET", path_acct, "", api_key, secret, passphrase)
+        try:
+            r = await client.get(BITGET_API_BASE + path_acct, headers=hdrs)
+            body = r.json()
+            code = str(body.get("code", ""))
+            data = body.get("data") or {}
+            probes.append({"path": path_acct, "http": r.status_code,
+                           "code": code, "msg": body.get("msg"),
+                           "data_preview": str(data)[:200]})
+
+            if code in ("00000", "0", "200") and isinstance(data, dict):
+                usdt = 0.0
+                for f in ("usdtAmount", "totalUsdtAmount", "amount", "totalAmount"):
+                    v = data.get(f)
+                    if v not in (None, "", "0"):
                         try:
-                            amt = float(v)
-                            break
+                            usdt = float(v); break
                         except (TypeError, ValueError):
                             pass
-                if amt <= 0:
-                    continue
-                # APR — stored as decimal (0.05) or percent (5.0) depending on endpoint
+                # Estimate APR from 24h earnings: (earning/principal) * 365 * 100
                 apr = None
-                for f in ("annualInterestRate", "interestRate", "apr", "apy",
-                          "annualRate", "yield", "currentRate"):
-                    v = it.get(f)
+                earning_24h = 0.0
+                for f in ("usdt24hEarning", "earningAmount", "interestAmount",
+                          "24hEarning", "dailyEarning"):
+                    v = data.get(f)
                     if v not in (None, ""):
                         try:
-                            fv = float(v)
-                            # Normalize: if > 1 assume already in % form; else convert
-                            apr = fv if fv > 1 else fv * 100
-                            break
+                            earning_24h = float(v); break
                         except (TypeError, ValueError):
                             pass
-                parsed.append({"coin": coin, "amount": round(amt, 4), "apr": apr})
-
-            if not parsed:
-                continue
-
-            total = sum(p["amount"] for p in parsed)
-            # Weighted average APR across items that have APR data
-            apr_items = [p for p in parsed if p["apr"] is not None]
-            weighted_apr = None
-            if apr_items:
-                apr_total = sum(p["amount"] for p in apr_items)
-                if apr_total > 0:
-                    weighted_apr = round(
-                        sum(p["amount"] * p["apr"] for p in apr_items) / apr_total, 2
-                    )
-
-            logger.info("Earn balance: total=%.2f items=%d weighted_apr=%s source=%s",
-                        total, len(parsed), weighted_apr, path)
-            return {
-                "total": round(total, 2),
-                "items": parsed,
-                "apr": weighted_apr,
-                "source": path,
-                "error": None,
-                "_probes": probes,
-            }
+                if usdt > 0 and earning_24h > 0:
+                    apr = round(earning_24h / usdt * 365 * 100, 2)
+                items = [{"coin": "USDT", "amount": round(usdt, 4), "apr": apr}] if usdt > 0 else []
+                logger.info("Earn[account]: usdt=%.2f apr=%s", usdt, apr)
+                return {"total": round(usdt, 2), "items": items, "apr": apr,
+                        "source": path_acct, "error": None, "_probes": probes}
+        except Exception as exc:
+            probes.append({"path": path_acct, "error": str(exc)})
+            logger.warning("Earn API %s: %s", path_acct, exc)
 
     return {"total": 0.0, "items": [], "apr": None, "source": None,
             "error": "no earn endpoint returned data", "_probes": probes}
