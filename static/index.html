@@ -612,6 +612,27 @@
       </div>
     </div>
 
+    <!-- Stopped Copies card -->
+    <div id="stopped-copies-section" style="display:none">
+      <div class="trader-row" style="cursor:pointer" onclick="editStoppedCopies()" title="Tap to edit">
+        <div>
+          <div class="trader-name-row">
+            <span class="trader-name">Stopped Copies</span>
+            <span class="type-badge" id="stopped-copies-badge" style="background:rgba(212,136,10,0.15);color:var(--amber)">0 COPIES</span>
+          </div>
+          <div class="trader-metrics">
+            <div>
+              <div class="trader-metric-label">Net P&amp;L</div>
+              <div class="trader-metric-val" id="stopped-copies-pnl">—</div>
+            </div>
+          </div>
+        </div>
+        <div class="trader-right" style="justify-content:flex-end;align-items:center">
+          <svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:var(--muted);flex-shrink:0" title="Edit"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+        </div>
+      </div>
+    </div>
+
   </div>
 </div>
 
@@ -1188,11 +1209,24 @@
       const ccNote = document.getElementById('cancelled-copies-note');
       const ccPnl = mt5.cancelled_copy_pnl;
       const ccCount = mt5.cancelled_copy_count;
-      if (ccPnl != null && Math.abs(ccPnl) >= 0.01 && ccCount > 0) {
-        ccNote.textContent = `incl. ${fmt(ccPnl)} from ${ccCount} stopped cop${ccCount === 1 ? 'y' : 'ies'}`;
+      if (ccPnl != null && Math.abs(ccPnl) >= 0.01) {
+        ccNote.textContent = `incl. ${fmt(ccPnl)} from ${ccCount > 0 ? ccCount : '?'} stopped cop${ccCount === 1 ? 'y' : 'ies'}`;
         ccNote.style.display = '';
       } else {
         ccNote.style.display = 'none';
+      }
+
+      // Stopped copies card
+      const scSec = document.getElementById('stopped-copies-section');
+      if (ccPnl != null && Math.abs(ccPnl) >= 0.01) {
+        scSec.style.display = 'block';
+        const pnlEl = document.getElementById('stopped-copies-pnl');
+        pnlEl.textContent = fmt(ccPnl);
+        pnlEl.className = 'trader-metric-val ' + (ccPnl >= 0 ? 'green' : 'red');
+        const badge = document.getElementById('stopped-copies-badge');
+        badge.textContent = (ccCount > 0 ? ccCount : '?') + ' COPI' + (ccCount === 1 ? 'Y' : 'ES');
+      } else {
+        scSec.style.display = 'none';
       }
 
       renderPositions(positions);
@@ -1204,6 +1238,23 @@
     } finally {
       btn.disabled = false; btn.classList.remove('spinning');
     }
+  }
+
+  async function editStoppedCopies() {
+    const cur = document.getElementById('stopped-copies-pnl').textContent;
+    const input = prompt('Enter net P&L for stopped copies (e.g. 450.50 or -120):\nLeave blank to clear.', cur.replace(/[^0-9.\-]/g, ''));
+    if (input === null) return;
+    const val = input.trim() === '' ? 0 : parseFloat(input);
+    if (isNaN(val)) { alert('Invalid number'); return; }
+    try {
+      const r = await fetch('/api/settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({cancelled_copy_pnl: val}),
+      });
+      if (!r.ok) { alert('Save failed: ' + r.status); return; }
+      await fetchData();
+    } catch(e) { alert('Error: ' + e.message); }
   }
 
   async function fetchTraders() {
