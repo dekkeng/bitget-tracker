@@ -767,73 +767,94 @@ async def _fetch_cancelled_copies(page, push_fn: Callable):
 
 # ── Elite (lead) trader portfolio ─────────────────────────────────────────────
 
-_ELITE_PROBES = [
-    # Most likely names for the lead-trader's own portfolio endpoint
-    "/v1/trace/mt5/trace/getTraderPortfolios",
-    "/v1/trace/mt5/trace/getTraderPortfolio",
-    "/v1/trace/mt5/trace/getMyTraderPortfolio",
-    "/v1/trace/mt5/trace/getMyTraderPortfolios",
-    "/v1/trace/mt5/trace/myTraderPortfolio",
-    "/v1/trace/mt5/trace/traderPortfolio",
-    "/v1/trace/mt5/trace/traderPortfolioDetail",
-    "/v1/trace/mt5/trace/getTraderDetail",
-    "/v1/trace/mt5/trace/getTraderInfo",
-    "/v1/trace/mt5/trace/getLeaderPortfolio",
-    "/v1/trace/mt5/trace/getLeaderPortfolios",
-    "/v1/trace/mt5/trace/getElitePortfolio",
-    "/v1/trace/mt5/trace/getElitePortfolios",
-    "/v1/trace/mt5/trace/elitePortfolio",
-    "/v1/trace/mt5/trace/getMyPortfolio",
-    "/v1/trace/mt5/trace/getMyPortfolios",
-    # follow/ sub-path variants
-    "/v1/trace/mt5/follow/getTraderPortfolio",
-    "/v1/trace/mt5/follow/getLeaderPortfolio",
-    "/v1/trace/mt5/follow/getElitePortfolio",
-    # trader/ sub-path
-    "/v1/trace/mt5/trader/portfolio",
-    "/v1/trace/mt5/trader/getPortfolio",
-    "/v1/trace/mt5/trader/myPortfolio",
-    "/v1/trace/mt5/trader/detail",
-    # top-level copy paths
-    "/v1/copy/mt5/getTraderPortfolio",
-    "/v1/copy/mt5/getLeaderPortfolio",
-    "/v1/copy/mt5/getElitePortfolio",
-    "/v1/copy/mt5/myPortfolio",
+# (method, endpoint) — tries both POST and GET for promising paths
+_ELITE_PROBES: list[tuple[str, str]] = [
+    # ── Same trace/mt5 base, broader name variations ────────────────────────
+    ("POST", "/v1/trace/mt5/trace/getTraderPortfolios"),
+    ("POST", "/v1/trace/mt5/trace/getTraderPortfolio"),
+    ("POST", "/v1/trace/mt5/trace/getMyTraderPortfolio"),
+    ("POST", "/v1/trace/mt5/trace/getSelfTraderPortfolio"),
+    ("POST", "/v1/trace/mt5/trace/getEliteTraderPortfolio"),
+    ("POST", "/v1/trace/mt5/trace/getEliteCenterPortfolio"),
+    ("GET",  "/v1/trace/mt5/trace/getTraderPortfolio"),
+    ("GET",  "/v1/trace/mt5/trace/getMyTraderPortfolio"),
+    ("GET",  "/v1/trace/mt5/trace/getEliteTraderPortfolio"),
+    # ── elite / eliteCenter sub-path ─────────────────────────────────────────
+    ("POST", "/v1/trace/mt5/elite/getPortfolio"),
+    ("POST", "/v1/trace/mt5/elite/portfolio"),
+    ("POST", "/v1/trace/mt5/elite/getTraderPortfolio"),
+    ("GET",  "/v1/trace/mt5/elite/getPortfolio"),
+    ("GET",  "/v1/trace/mt5/elite/portfolio"),
+    ("POST", "/v1/trace/mt5/eliteCenter/getPortfolio"),
+    ("POST", "/v1/trace/mt5/eliteCenter/portfolio"),
+    ("POST", "/v1/trace/mt5/eliteCenter/getTraderPortfolio"),
+    ("GET",  "/v1/trace/mt5/eliteCenter/getPortfolio"),
+    # ── trader/ sub-path (both methods) ──────────────────────────────────────
+    ("POST", "/v1/trace/mt5/trader/getPortfolio"),
+    ("POST", "/v1/trace/mt5/trader/portfolio"),
+    ("POST", "/v1/trace/mt5/trader/detail"),
+    ("GET",  "/v1/trace/mt5/trader/getPortfolio"),
+    ("GET",  "/v1/trace/mt5/trader/portfolio"),
+    # ── cfd-center paths (like /cfd-center/followers for cancelled copies) ───
+    ("POST", "/v1/trace/mt5/cfdCenter/getTraderPortfolio"),
+    ("POST", "/v1/trace/mt5/cfdCenter/getElitePortfolio"),
+    ("GET",  "/v1/trace/mt5/cfdCenter/getTraderPortfolio"),
+    # ── Top-level /v1/copy/ paths ─────────────────────────────────────────────
+    ("POST", "/v1/copy/mt5/getTraderPortfolio"),
+    ("POST", "/v1/copy/mt5/getElitePortfolio"),
+    ("POST", "/v1/copy/mt5/eliteCenter"),
+    ("POST", "/v1/copy/mt5/getMyTraderPortfolio"),
+    ("GET",  "/v1/copy/mt5/getTraderPortfolio"),
+    ("GET",  "/v1/copy/mt5/getElitePortfolio"),
+    # ── /v1/elite/ top-level ─────────────────────────────────────────────────
+    ("POST", "/v1/elite/mt5/getPortfolio"),
+    ("POST", "/v1/elite/mt5/portfolio"),
+    ("GET",  "/v1/elite/mt5/getPortfolio"),
+    ("POST", "/v1/elite/getPortfolio"),
+    ("GET",  "/v1/elite/getPortfolio"),
+    # ── /v1/mix/ (futures-style base, sometimes shared) ──────────────────────
+    ("POST", "/v1/mix/trace/getTraderPortfolio"),
+    ("POST", "/v1/mix/trace/getElitePortfolio"),
+    ("GET",  "/v1/mix/trace/getTraderPortfolio"),
 ]
-_ELITE_KEYS = {"followerCount", "followCount", "currentFollowers",
-               "totalProfit", "cumulativeProfit", "traderBalance",
-               "eliteBalance", "leaderBalance"}
-_elite_ep: str | None = None  # cached once found
+# Keys visible in the screenshot — any one of these indicates we have elite trader data
+_ELITE_KEYS = {"aum", "copiersPnl", "copiers", "followerCount", "followCount",
+               "currentFollowers", "totalProfit", "cumulativeProfit",
+               "traderBalance", "eliteBalance", "leaderBalance",
+               "equity", "unrealizedProfitShare", "roi"}
+_elite_ep:     str | None = None
+_elite_method: str        = "POST"
 
 
 async def _fetch_elite_trader(page, push_fn: Callable):
     """Find and fetch the user's own elite (lead) trader portfolio balance."""
-    global _elite_ep
+    global _elite_ep, _elite_method
 
-    endpoints = [_elite_ep] if _elite_ep else _ELITE_PROBES
+    probes = [(_elite_method, _elite_ep)] if _elite_ep else _ELITE_PROBES
+    hits: list[dict] = []   # non-404 results for debugging
 
-    for ep in endpoints:
+    for method, ep in probes:
         try:
-            result = await page.evaluate("""async (ep) => {
+            result = await page.evaluate("""async ([method, ep]) => {
                 try {
-                    const r = await fetch(ep, {
-                        method: 'POST', credentials: 'include',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({}),
-                    });
+                    const opts = {method, credentials: 'include',
+                                  headers: {'Content-Type': 'application/json'}};
+                    if (method === 'POST') opts.body = JSON.stringify({});
+                    const r = await fetch(ep, opts);
                     const text = await r.text();
                     if (text.trimStart().startsWith('<')) return {status: r.status, error: 'html_redirect'};
                     const j = JSON.parse(text);
                     const d = j?.data;
-                    // data may be a single object or an array; grab first item if array
-                    const row = Array.isArray(d) ? d[0] : (d?.portfolioDetails?.[0] ?? d?.list?.[0] ?? d?.rows?.[0] ?? d);
-                    return {status: r.status, code: j?.code,
-                            keys: row && typeof row === 'object' ? Object.keys(row).slice(0, 20) : null,
+                    const row = Array.isArray(d)
+                        ? d[0]
+                        : (d?.portfolioDetails?.[0] ?? d?.list?.[0] ?? d?.rows?.[0] ?? d);
+                    return {status: r.status, code: j?.code, msg: j?.msg,
+                            keys: row && typeof row === 'object' ? Object.keys(row).slice(0, 25) : null,
                             row: row};
                 } catch(e) { return {status: 0, error: String(e)}; }
-            }""", ep)
+            }""", [method, ep])
         except Exception as e:
-            logger.warning("Elite probe %s error: %s", ep, e)
+            logger.warning("Elite probe %s %s error: %s", method, ep, e)
             continue
 
         http = result.get("status") if isinstance(result, dict) else 0
@@ -845,23 +866,33 @@ async def _fetch_elite_trader(page, push_fn: Callable):
             break
         if http == 404:
             continue
+
+        # Log every non-404 so we can see what's there
+        hits.append({"method": method, "ep": ep, "http": http, "code": code,
+                     "msg": result.get("msg") if isinstance(result, dict) else None,
+                     "keys": result.get("keys") if isinstance(result, dict) else None})
+        logger.info("Elite probe non-404: %s %s http=%s code=%s keys=%s",
+                    method, ep, http, code,
+                    result.get("keys") if isinstance(result, dict) else None)
+
         if http == 200 and code in ("00000", "200", "0"):
-            row = result.get("row")
+            row = result.get("row") if isinstance(result, dict) else None
             if not isinstance(row, dict):
                 continue
             row_keys = set(row.keys())
-            # Must have at least one elite-trader-specific key and a balance field
-            if (_ELITE_KEYS & row_keys) or (
-                    {"balance", "totalBalance"} & row_keys and
-                    {"profit", "totalProfit", "dailyProfit"} & row_keys):
-                _elite_ep = ep
-                _status["elite_probe"] = {"ep": ep, "http": http, "code": code,
-                                          "keys": list(row_keys)[:20]}
+            if _ELITE_KEYS & row_keys:
+                _elite_ep     = ep
+                _elite_method = method
+                _status["elite_probe"] = {"found": True, "method": method, "ep": ep,
+                                          "http": http, "code": code,
+                                          "keys": list(row_keys)[:25], "hits": hits}
                 push_fn("elite_trader", row)
-                logger.info("Elite trader found: ep=%s balance=%s", ep, row.get("balance"))
+                logger.info("Elite trader FOUND: %s %s balance=%s equity=%s",
+                            method, ep, row.get("balance"), row.get("equity"))
                 return
             elif row_keys:
-                logger.debug("Elite probe hit wrong shape: ep=%s keys=%s", ep, list(row_keys)[:15])
+                logger.info("Elite probe 200 wrong shape: %s %s keys=%s",
+                            method, ep, list(row_keys)[:20])
 
-    _status.setdefault("elite_probe", {"found": False})
+    _status["elite_probe"] = {"found": False, "hits": hits}
 

@@ -573,17 +573,25 @@ def _push_data(kind: str, data, trader: str = None):
                     try: return float(v)
                     except (TypeError, ValueError): pass
             return 0.0
-        balance     = _f(row, "balance", "totalBalance", "totalAsset")
+        # Fields from screenshot: equity, balance, aum, totalProfit, roi, copiers
+        balance     = _f(row, "balance", "equity", "totalBalance", "totalAsset")
         all_time    = _f(row, "totalProfit", "allTimeProfit", "profit",
                          "realizedPnl", "realPnl", "cumulativeProfit")
         daily       = _f(row, "dailyProfit", "todayProfit", "dailyPnl",
                          "dayProfit", "profit24h")
-        followers   = int(row.get("followerCount") or row.get("followCount") or
-                          row.get("currentFollowers") or 0)
+        aum         = _f(row, "aum", "totalAum", "aumAmount")
+        copiers_raw = row.get("copiers") or row.get("followerCount") or \
+                      row.get("followCount") or row.get("currentFollowers") or "0"
+        # copiers may be "0/100" string or a plain int
+        try:
+            followers = int(str(copiers_raw).split("/")[0])
+        except (TypeError, ValueError):
+            followers = 0
         _elite["data"] = {
             "balance": round(balance, 2),
             "all_time_pnl": round(all_time, 4),
             "daily_pnl": round(daily, 4),
+            "aum": round(aum, 2),
             "follower_count": followers,
         }
         _elite["fetched_at"] = datetime.now(BKK).isoformat()
@@ -1114,6 +1122,7 @@ async def get_elite():
         "balance": data.get("balance", 0.0),
         "all_time_pnl": data.get("all_time_pnl"),
         "daily_pnl": data.get("daily_pnl"),
+        "aum": data.get("aum", 0.0),
         "follower_count": data.get("follower_count", 0),
         "fetched_at": _elite["fetched_at"],
         "error": _elite["error"],
