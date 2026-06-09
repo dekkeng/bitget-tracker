@@ -186,6 +186,12 @@ _investment: dict = {
     "error": None,
 }
 
+_earn: dict = {
+    "data": None,        # result from fetch_earn_balance
+    "fetched_at": None,
+    "error": None,
+}
+
 
 # ── Time helpers ──────────────────────────────────────────────────────────────
 
@@ -728,6 +734,33 @@ async def _investment_poller():
         await asyncio.sleep(6 * 3600)
 
 
+async def _refresh_earn() -> None:
+    global _earn
+    creds = _load_credentials()
+    if not creds:
+        return
+    try:
+        from bitget_api import fetch_earn_balance
+        result = await fetch_earn_balance(
+            creds["api_key"], creds["secret"], creds["passphrase"]
+        )
+        _earn["data"] = result
+        _earn["fetched_at"] = datetime.now(BKK).isoformat()
+        _earn["error"] = result.get("error")
+        logger.info("Earn refreshed: total=%.2f apr=%s", result["total"], result.get("apr"))
+    except Exception as e:
+        _earn["error"] = str(e)
+        logger.error("Earn refresh failed: %s", e)
+
+
+async def _earn_poller():
+    """Refresh earn balance on startup then every 6 hours."""
+    await asyncio.sleep(10)
+    while True:
+        await _refresh_earn()
+        await asyncio.sleep(6 * 3600)
+
+
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -744,9 +777,11 @@ async def lifespan(app: FastAPI):
     from browser_poller import start_poller
     task = asyncio.create_task(start_poller(_push_data))
     inv_task = asyncio.create_task(_investment_poller())
+    earn_task = asyncio.create_task(_earn_poller())
     yield
     task.cancel()
     inv_task.cancel()
+    earn_task.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -1014,6 +1049,28 @@ async def refresh_investment():
     return {"ok": True, "message": "Refresh started"}
 
 
+@app.get("/api/earn")
+async def get_earn():
+    creds = _load_credentials()
+    data = _earn["data"] or {}
+    return {
+        "total": data.get("total", 0.0),
+        "apr": data.get("apr"),
+        "items": data.get("items", []),
+        "fetched_at": _earn["fetched_at"],
+        "error": _earn["error"],
+        "has_credentials": creds is not None,
+    }
+
+
+@app.post("/api/earn/refresh")
+async def refresh_earn():
+    if not _load_credentials():
+        return {"ok": False, "error": "No API credentials configured"}
+    asyncio.create_task(_refresh_earn())
+    return {"ok": True, "message": "Refresh started"}
+
+
 @app.post("/api/credentials")
 async def save_credentials(request: Request):
     body = await request.json()
@@ -1030,6 +1087,7 @@ async def save_credentials(request: Request):
     }))
     logger.info("API credentials saved")
     asyncio.create_task(_refresh_investment())
+    asyncio.create_task(_refresh_earn())
     return {"ok": True}
 
 

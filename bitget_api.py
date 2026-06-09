@@ -236,3 +236,112 @@ async def fetch_net_investment(api_key: str, secret: str, passphrase: str,
         "_dep_sample": dep_sample,
         "_wdw_sample": withdrawals[:3],
     }
+
+
+async def fetch_earn_balance(api_key: str, secret: str, passphrase: str) -> dict:
+    """
+    Return earn (savings/flexible) balance and weighted APR across all earn positions.
+
+    Tries Bitget v2 earn endpoints in order:
+      1. GET /api/v2/earn/savings/assets  — flexible savings positions
+      2. GET /api/v2/earn/account         — consolidated earn account summary
+    """
+    async with httpx.AsyncClient(timeout=30) as client:
+        candidates = [
+            "/api/v2/earn/savings/assets",
+            "/api/v2/earn/account",
+        ]
+        for path in candidates:
+            qs = ""
+            hdrs = _auth_headers("GET", path, "", api_key, secret, passphrase)
+            try:
+                r = await client.get(BITGET_API_BASE + path, headers=hdrs)
+                body = r.json()
+            except Exception as exc:
+                logger.warning("Earn API %s: %s", path, exc)
+                continue
+
+            code = str(body.get("code", ""))
+            if code not in ("00000", "0", "200"):
+                logger.info("Earn API %s: code=%s msg=%s", path, code, body.get("msg"))
+                continue
+
+            data = body.get("data") or {}
+            items: list[dict] = []
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict):
+                items = (data.get("list") or data.get("assets") or
+                         data.get("rows") or data.get("data") or [])
+                # Flat summary: {totalAmount, ...}
+                if not items and data.get("totalAmount") is not None:
+                    total = 0.0
+                    try:
+                        total = float(data["totalAmount"])
+                    except (TypeError, ValueError):
+                        pass
+                    return {"total": round(total, 2), "items": [], "apr": None,
+                            "source": path, "error": None}
+
+            if not items:
+                continue
+
+            parsed = []
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                coin = str(it.get("coinName") or it.get("coin") or it.get("currency") or "")
+                # Amount / principal
+                amt = 0.0
+                for f in ("holdAmount", "amount", "totalAmount", "principal",
+                          "holdingAmount", "currentAmount"):
+                    v = it.get(f)
+                    if v not in (None, "", "0", 0):
+                        try:
+                            amt = float(v)
+                            break
+                        except (TypeError, ValueError):
+                            pass
+                if amt <= 0:
+                    continue
+                # APR — stored as decimal (0.05) or percent (5.0) depending on endpoint
+                apr = None
+                for f in ("annualInterestRate", "interestRate", "apr", "apy",
+                          "annualRate", "yield", "currentRate"):
+                    v = it.get(f)
+                    if v not in (None, ""):
+                        try:
+                            fv = float(v)
+                            # Normalize: if > 1 assume already in % form; else convert
+                            apr = fv if fv > 1 else fv * 100
+                            break
+                        except (TypeError, ValueError):
+                            pass
+                parsed.append({"coin": coin, "amount": round(amt, 4), "apr": apr})
+
+            if not parsed:
+                continue
+
+            total = sum(p["amount"] for p in parsed)
+            # Weighted average APR across items that have APR data
+            apr_items = [p for p in parsed if p["apr"] is not None]
+            weighted_apr = None
+            if apr_items:
+                apr_total = sum(p["amount"] for p in apr_items)
+                if apr_total > 0:
+                    weighted_apr = round(
+                        sum(p["amount"] * p["apr"] for p in apr_items) / apr_total, 2
+                    )
+
+            logger.info("Earn balance: total=%.2f items=%d weighted_apr=%s source=%s",
+                        total, len(parsed), weighted_apr, path)
+            return {
+                "total": round(total, 2),
+                "items": parsed,
+                "apr": weighted_apr,
+                "source": path,
+                "error": None,
+            }
+
+    return {"total": 0.0, "items": [], "apr": None, "source": None,
+            "error": "no earn endpoint returned data"}

@@ -513,6 +513,16 @@
               </div>
             </div>
           </div>
+          <!-- Earn balance row — shown only when API credentials set and earn > 0 -->
+          <div id="earn-section" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:10px;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);font-weight:600">Earn</span>
+                <span id="earn-apr-badge" style="display:none;font-family:var(--mono);font-size:10px;font-weight:700;color:var(--green);background:rgba(0,196,122,0.10);padding:1px 6px;border-radius:999px"></span>
+              </div>
+              <div id="earn-balance" style="font-family:var(--mono);font-size:15px;font-weight:700;color:var(--green)">—</div>
+            </div>
+          </div>
         </div>
         <!-- Goal ring — tap to configure -->
         <div class="goal-ring-wrap" id="goal-ring-wrap" onclick="openSettings()" title="Tap to set goal" style="display:none">
@@ -1012,6 +1022,24 @@
     } catch(e) { console.error('fetchInvestment', e); }
   }
 
+  async function fetchEarn() {
+    try {
+      const earn = await fetch('/api/earn').then(r => r.json());
+      const sec = document.getElementById('earn-section');
+      if (!earn.has_credentials || !earn.total) { sec.style.display = 'none'; return; }
+      sec.style.display = 'block';
+      document.getElementById('earn-balance').textContent =
+        '$' + earn.total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const aprBadge = document.getElementById('earn-apr-badge');
+      if (earn.apr != null) {
+        aprBadge.textContent = earn.apr.toFixed(2) + '% APR';
+        aprBadge.style.display = 'inline-block';
+      } else {
+        aprBadge.style.display = 'none';
+      }
+    } catch(e) { console.error('fetchEarn', e); }
+  }
+
   async function fetchData() {
     const btn = document.getElementById('refresh-btn');
     btn.disabled = true; btn.classList.add('spinning');
@@ -1216,9 +1244,10 @@
   fetchData();
   fetchTraders();
   fetchInvestment();
-  setInterval(() => { fetchData(); fetchInvestment(); }, 30_000);
+  fetchEarn();
+  setInterval(() => { fetchData(); fetchInvestment(); fetchEarn(); }, 30_000);
   setInterval(fetchTraders, 30_000);
-  document.getElementById('refresh-btn').addEventListener('click', () => { fetchData(); fetchTraders(); fetchInvestment(); });
+  document.getElementById('refresh-btn').addEventListener('click', () => { fetchData(); fetchTraders(); fetchInvestment(); fetchEarn(); });
 
   // Tabs
   document.querySelectorAll('.tab-btn').forEach(btn => {
