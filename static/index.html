@@ -1092,9 +1092,8 @@
   async function fetchElite() {
     try {
       const elite = await fetch('/api/elite').then(r => r.json());
-      const sec = document.getElementById('elite-section');
-      if (!elite.available) { sec.style.display = 'none'; _eliteTotal = 0; return; }
-      sec.style.display = 'block';
+      // Always show card so user can tap to enter value
+      document.getElementById('elite-section').style.display = 'block';
       _eliteTotal = elite.balance || 0;
       // Balance — only show if live data available
       const balWrap = document.getElementById('elite-balance-wrap');
@@ -1125,7 +1124,12 @@
         atEl.textContent = fmt(elite.all_time_pnl);
         atEl.className = 'trader-alltime ' + colorClass(elite.all_time_pnl);
         atLabel.style.display = ''; atEl.style.display = '';
-      } else { atLabel.style.display = 'none'; atEl.style.display = 'none'; }
+      } else {
+        atLabel.style.display = ''; atEl.style.display = '';
+        atLabel.textContent = 'ALL TIME P&L';
+        atEl.textContent = 'TAP TO SET';
+        atEl.className = 'trader-alltime';
+      }
       // Followers
       const followEl = document.getElementById('elite-followers');
       followEl.textContent = elite.follower_count > 0
