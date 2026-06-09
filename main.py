@@ -731,15 +731,17 @@ def _rebuild_summary() -> None:
 
     cancelled_copy_pnl = round(_settings.get("cancelled_copy_pnl", 0.0), 2)
     cancelled_copy_count = _settings.get("cancelled_copy_count", 0)
+    elite_all_time_pnl = round(_settings.get("elite_all_time_pnl", 0.0), 2)
 
     _mt5["summary"] = {
         "daily_pnl": round(total_daily_pnl, 4),
         "open_positions": total_open_count,
         "open_positions_pnl": round(total_open_pnl, 4),
-        "all_time_pnl": round(total_all_time_pnl + cancelled_copy_pnl, 4),
+        "all_time_pnl": round(total_all_time_pnl + cancelled_copy_pnl + elite_all_time_pnl, 4),
         "active_trader_pnl": round(total_all_time_pnl, 4),
         "cancelled_copy_pnl": cancelled_copy_pnl,
         "cancelled_copy_count": cancelled_copy_count,
+        "elite_all_time_pnl": elite_all_time_pnl,
         "total_balance": round(total_balance, 2),
         "total_investment": round(total_investment, 2),
         "pushed_at": _mt5["pushed_at"],
@@ -971,6 +973,8 @@ async def post_settings(request: Request):
         _settings["investment"] = round(float(body["investment"]), 2)
     if "cancelled_copy_pnl" in body:
         _settings["cancelled_copy_pnl"] = round(float(body["cancelled_copy_pnl"]), 2)
+    if "elite_all_time_pnl" in body:
+        _settings["elite_all_time_pnl"] = round(float(body["elite_all_time_pnl"]), 2)
     _save_settings(_settings)
     if any(_tc(n)["history_raw"] is not None for n in _trader_names()):
         _rebuild_summary()
@@ -1139,15 +1143,18 @@ async def refresh_earn():
 @app.get("/api/elite")
 async def get_elite():
     data = _elite["data"] or {}
+    # Fall back to manually-set PnL from settings when no live data
+    settings_pnl = _settings.get("elite_all_time_pnl", 0.0)
+    all_time = data.get("all_time_pnl") if _elite["data"] else (settings_pnl or None)
     return {
         "balance": data.get("balance", 0.0),
-        "all_time_pnl": data.get("all_time_pnl"),
+        "all_time_pnl": all_time,
         "daily_pnl": data.get("daily_pnl"),
         "aum": data.get("aum", 0.0),
         "follower_count": data.get("follower_count", 0),
         "fetched_at": _elite["fetched_at"],
         "error": _elite["error"],
-        "available": _elite["data"] is not None,
+        "available": _elite["data"] is not None or abs(settings_pnl) >= 0.01,
     }
 
 

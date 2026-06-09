@@ -592,14 +592,14 @@
 
     <!-- Elite trader card -->
     <div id="elite-section" style="display:none">
-      <div class="trader-row">
+      <div class="trader-row" style="cursor:pointer" onclick="editElitePnl()" title="Tap to edit PnL">
         <div>
           <div class="trader-name-row">
             <span class="trader-name">Elite Portfolio</span>
             <span class="type-badge futures">LEADER</span>
           </div>
           <div class="trader-metrics">
-            <div>
+            <div id="elite-balance-wrap" style="display:none">
               <div class="trader-metric-label">Balance</div>
               <div class="trader-metric-val green" id="elite-balance">—</div>
             </div>
@@ -614,9 +614,9 @@
           </div>
         </div>
         <div class="trader-right">
-          <div class="trader-alltime-label" id="elite-alltime-label" style="display:none">ALL TIME</div>
+          <div class="trader-alltime-label" id="elite-alltime-label" style="display:none">ALL TIME P&amp;L</div>
           <div class="trader-alltime" id="elite-alltime" style="display:none">—</div>
-          <div style="font-size:10px;color:var(--muted);margin-top:2px" id="elite-followers" style="display:none"></div>
+          <div style="font-size:10px;color:var(--muted);margin-top:2px" id="elite-followers"></div>
         </div>
       </div>
     </div>
@@ -1093,11 +1093,16 @@
     try {
       const elite = await fetch('/api/elite').then(r => r.json());
       const sec = document.getElementById('elite-section');
-      if (!elite.available || !elite.balance) { sec.style.display = 'none'; _eliteTotal = 0; return; }
+      if (!elite.available) { sec.style.display = 'none'; _eliteTotal = 0; return; }
       sec.style.display = 'block';
       _eliteTotal = elite.balance || 0;
-      document.getElementById('elite-balance').textContent =
-        '$' + elite.balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      // Balance — only show if live data available
+      const balWrap = document.getElementById('elite-balance-wrap');
+      if (elite.balance > 0) {
+        document.getElementById('elite-balance').textContent =
+          '$' + elite.balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        balWrap.style.display = '';
+      } else { balWrap.style.display = 'none'; }
       // AUM
       const aumWrap = document.getElementById('elite-aum-wrap');
       if (elite.aum && elite.aum > 0) {
@@ -1112,9 +1117,7 @@
         dailyEl.textContent = fmt(elite.daily_pnl);
         dailyEl.className = 'trader-metric-val ' + colorClass(elite.daily_pnl);
         dailyWrap.style.display = '';
-      } else {
-        dailyWrap.style.display = 'none';
-      }
+      } else { dailyWrap.style.display = 'none'; }
       // All-time PnL
       const atLabel = document.getElementById('elite-alltime-label');
       const atEl    = document.getElementById('elite-alltime');
@@ -1122,18 +1125,30 @@
         atEl.textContent = fmt(elite.all_time_pnl);
         atEl.className = 'trader-alltime ' + colorClass(elite.all_time_pnl);
         atLabel.style.display = ''; atEl.style.display = '';
-      } else {
-        atLabel.style.display = 'none'; atEl.style.display = 'none';
-      }
+      } else { atLabel.style.display = 'none'; atEl.style.display = 'none'; }
       // Followers
       const followEl = document.getElementById('elite-followers');
-      if (elite.follower_count > 0) {
-        followEl.textContent = elite.follower_count + ' follower' + (elite.follower_count === 1 ? '' : 's');
-        followEl.style.display = '';
-      } else {
-        followEl.style.display = 'none';
-      }
+      followEl.textContent = elite.follower_count > 0
+        ? elite.follower_count + ' follower' + (elite.follower_count === 1 ? '' : 's') : '';
     } catch(e) { console.error('fetchElite', e); }
+  }
+
+  async function editElitePnl() {
+    const cur = document.getElementById('elite-alltime').textContent;
+    const input = prompt('Enter Elite Portfolio realized P&L (e.g. -147.92):\nLeave blank to clear.', cur.replace(/[^0-9.\-]/g, ''));
+    if (input === null) return;
+    const val = input.trim() === '' ? 0 : parseFloat(input);
+    if (isNaN(val)) { alert('Invalid number'); return; }
+    try {
+      const r = await fetch('/api/settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({elite_all_time_pnl: val}),
+      });
+      if (!r.ok) { alert('Save failed: ' + r.status); return; }
+      await fetchElite();
+      await fetchData();
+    } catch(e) { alert('Error: ' + e.message); }
   }
 
   async function fetchEarn() {
