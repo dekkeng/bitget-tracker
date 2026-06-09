@@ -222,11 +222,20 @@ def _extract_positions(raw: Any) -> list:
     if isinstance(raw, list):
         return raw
     if isinstance(raw, dict):
+        # Top-level list keys (tracePosition returns {rows:[...]} or {list:[...]})
+        for key in ("list", "rows", "positions", "posList", "data"):
+            v = raw.get(key)
+            if isinstance(v, list) and v:
+                return v
+        # One level deeper via "data" wrapper
         d = raw.get("data")
         if isinstance(d, list):
             return d
         if isinstance(d, dict):
-            return d.get("list") or d.get("rows") or d.get("posList") or d.get("data") or []
+            for key in ("list", "rows", "positions", "posList"):
+                v = d.get(key)
+                if isinstance(v, list) and v:
+                    return v
     return []
 
 
@@ -868,6 +877,18 @@ async def get_mt5_traders():
 @app.get("/api/mt5/positions")
 async def get_mt5_positions():
     return _parse_positions(_mt5["positions_raw"])
+
+
+@app.get("/api/mt5/positions/raw")
+async def get_mt5_positions_raw():
+    """Return raw position data for field-name diagnosis."""
+    raw = _mt5["positions_raw"]
+    rows = _extract_positions(raw)
+    return {"raw_type": type(raw).__name__,
+            "raw_keys": list(raw.keys())[:20] if isinstance(raw, dict) else None,
+            "row_count": len(rows),
+            "row0_keys": list(rows[0].keys())[:30] if rows and isinstance(rows[0], dict) else None,
+            "row0": rows[0] if rows else None}
 
 
 @app.get("/api/mt5/trades")

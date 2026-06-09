@@ -226,8 +226,8 @@ async def _active_poll(page, push_fn: Callable,
         pos_probes = []
         pos_found = False
         for ep in [
+            "/v1/trace/mt5/data/tracePosition",       # confirmed 200+rows
             "/v1/trace/mt5/trace/getFollowOpenPosition",
-            "/v1/trace/mt5/data/tracePosition",
             "/v1/trace/mt5/trace/myFollowOpenPosition",
             "/v1/trace/mt5/trace/getFollowOpenOrder",
         ]:
