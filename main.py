@@ -754,11 +754,11 @@ async def _refresh_earn() -> None:
 
 
 async def _earn_poller():
-    """Refresh earn balance on startup then every 6 hours."""
+    """Refresh earn balance on startup then every 30 minutes."""
     await asyncio.sleep(10)
     while True:
         await _refresh_earn()
-        await asyncio.sleep(6 * 3600)
+        await asyncio.sleep(30 * 60)
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
