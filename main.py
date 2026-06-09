@@ -1060,6 +1060,7 @@ async def get_earn():
         "fetched_at": _earn["fetched_at"],
         "error": _earn["error"],
         "has_credentials": creds is not None,
+        "_probes": data.get("_probes", []),
     }
 
 

@@ -242,28 +242,36 @@ async def fetch_earn_balance(api_key: str, secret: str, passphrase: str) -> dict
     """
     Return earn (savings/flexible) balance and weighted APR across all earn positions.
 
-    Tries Bitget v2 earn endpoints in order:
-      1. GET /api/v2/earn/savings/assets  — flexible savings positions
-      2. GET /api/v2/earn/account         — consolidated earn account summary
+    Tries multiple Bitget v2 earn endpoints in order and records each attempt
+    in _probes for diagnostics.
     """
     async with httpx.AsyncClient(timeout=30) as client:
         candidates = [
             "/api/v2/earn/savings/assets",
             "/api/v2/earn/account",
+            "/api/v2/earn/savings/account",
+            "/api/v2/earn/savings/hold",
+            "/api/v2/financial/savings/hold",
+            "/api/v2/earn/savings/current-position",
         ]
+        probes: list[dict] = []
         for path in candidates:
-            qs = ""
             hdrs = _auth_headers("GET", path, "", api_key, secret, passphrase)
             try:
                 r = await client.get(BITGET_API_BASE + path, headers=hdrs)
                 body = r.json()
             except Exception as exc:
                 logger.warning("Earn API %s: %s", path, exc)
+                probes.append({"path": path, "error": str(exc)})
                 continue
 
             code = str(body.get("code", ""))
+            msg = body.get("msg", "")
+            data_preview = str(body.get("data", ""))[:120]
+            probes.append({"path": path, "http": r.status_code, "code": code,
+                           "msg": msg, "data_preview": data_preview})
             if code not in ("00000", "0", "200"):
-                logger.info("Earn API %s: code=%s msg=%s", path, code, body.get("msg"))
+                logger.info("Earn API %s: code=%s msg=%s", path, code, msg)
                 continue
 
             data = body.get("data") or {}
@@ -341,7 +349,8 @@ async def fetch_earn_balance(api_key: str, secret: str, passphrase: str) -> dict
                 "apr": weighted_apr,
                 "source": path,
                 "error": None,
+                "_probes": probes,
             }
 
     return {"total": 0.0, "items": [], "apr": None, "source": None,
-            "error": "no earn endpoint returned data"}
+            "error": "no earn endpoint returned data", "_probes": probes}
