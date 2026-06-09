@@ -709,23 +709,84 @@ async def _fetch_cancelled_copies(page, push_fn: Callable):
     """Probe for cancelled CFD copy portfolios (account-level, no navigation).
 
     getFollowPortfolios ignores all status/filter params — always returns active
-    portfolios. Kept as fast probes in case Bitget ever adds a real filter param.
+    portfolios. We fan out across many endpoint name guesses and body variations.
+    If any returns stopped-copy rows (identified by _CANCEL_KEYS), it auto-populates.
 
-    The real cancelled-copies endpoint lives behind a lazy tab click on
-    /cfd-center/followers and hasn't been captured yet. Use the manual override:
-    POST /api/settings {"cancelled_copy_pnl": <value>}
+    The real endpoint likely lives behind a lazy tab click on /cfd-center/followers.
+    Use Proxyman to capture it, or wait for one of the probes below to hit.
+    Manual override: POST /api/settings {"cancelled_copy_pnl": <value>}
     """
+    # (endpoint, body)
     probes = [
-        {"followStatus": 3},
-        {"followStatus": "closed"},
-        {"status": "CLOSED"},
+        # ── Existing endpoint, more body variations ───────────────────────────
+        ("/v1/trace/mt5/trace/getFollowPortfolios",     {"followStatus": "cancel"}),
+        ("/v1/trace/mt5/trace/getFollowPortfolios",     {"followStatus": "CANCEL"}),
+        ("/v1/trace/mt5/trace/getFollowPortfolios",     {"followStatus": "stop"}),
+        ("/v1/trace/mt5/trace/getFollowPortfolios",     {"followStatus": "STOP"}),
+        ("/v1/trace/mt5/trace/getFollowPortfolios",     {"followStatus": 4}),
+        ("/v1/trace/mt5/trace/getFollowPortfolios",     {"followStatus": 5}),
+        ("/v1/trace/mt5/trace/getFollowPortfolios",     {"followStatus": 2}),
+        ("/v1/trace/mt5/trace/getFollowPortfolios",     {"status": "cancel"}),
+        ("/v1/trace/mt5/trace/getFollowPortfolios",     {"status": "stop"}),
+        ("/v1/trace/mt5/trace/getFollowPortfolios",     {"status": 3}),
+        ("/v1/trace/mt5/trace/getFollowPortfolios",     {"pageNo": 1, "pageSize": 50, "followStatus": 3}),
+        # ── Different endpoint names, same path prefix ────────────────────────
+        ("/v1/trace/mt5/trace/getFollowPortfolioList",  {"followStatus": 3}),
+        ("/v1/trace/mt5/trace/getFollowPortfolioList",  {"status": "cancel"}),
+        ("/v1/trace/mt5/trace/getFollowPortfolioList",  {}),
+        ("/v1/trace/mt5/trace/getStopFollowPortfolios", {}),
+        ("/v1/trace/mt5/trace/getStopFollowPortfolios", {"pageNo": 1, "pageSize": 50}),
+        ("/v1/trace/mt5/trace/getStopFollowList",       {}),
+        ("/v1/trace/mt5/trace/getStopFollowList",       {"pageNo": 1, "pageSize": 50}),
+        ("/v1/trace/mt5/trace/getFollowHistoryPortfolio", {}),
+        ("/v1/trace/mt5/trace/getFollowHistoryPortfolio", {"pageNo": 1, "pageSize": 50}),
+        ("/v1/trace/mt5/trace/getFollowHistory",        {}),
+        ("/v1/trace/mt5/trace/getFollowHistory",        {"pageNo": 1, "pageSize": 50}),
+        ("/v1/trace/mt5/trace/historyPortfolio",        {}),
+        ("/v1/trace/mt5/trace/historyPortfolio",        {"pageNo": 1, "pageSize": 50}),
+        ("/v1/trace/mt5/trace/cancelFollowList",        {}),
+        ("/v1/trace/mt5/trace/cancelledFollowList",     {}),
+        ("/v1/trace/mt5/trace/followerHistory",         {}),
+        ("/v1/trace/mt5/trace/followerHistoryList",     {}),
+        ("/v1/trace/mt5/trace/getFollowerHistory",      {}),
+        ("/v1/trace/mt5/trace/getFollowerHistoryList",  {}),
+        # ── Different sub-path (follow vs trace) ─────────────────────────────
+        ("/v1/trace/mt5/follow/getStopList",            {}),
+        ("/v1/trace/mt5/follow/stopList",               {}),
+        ("/v1/trace/mt5/follow/historyList",            {}),
+        ("/v1/trace/mt5/follow/cancelList",             {}),
+        ("/v1/trace/mt5/follow/getHistoryPortfolios",   {}),
+        ("/v1/trace/mt5/follow/getStopPortfolios",      {}),
+        ("/v1/trace/mt5/follow/getPortfolioHistory",    {}),
+        # ── follower sub-path ─────────────────────────────────────────────────
+        ("/v1/trace/mt5/follower/stopList",             {}),
+        ("/v1/trace/mt5/follower/historyList",          {}),
+        ("/v1/trace/mt5/follower/getStopPortfolios",    {}),
+        ("/v1/trace/mt5/follower/getHistoryPortfolios", {}),
+        ("/v1/trace/mt5/follower/getPortfolioHistory",  {}),
+        # ── copy sub-path ─────────────────────────────────────────────────────
+        ("/v1/trace/mt5/copy/stopList",                 {}),
+        ("/v1/trace/mt5/copy/cancelList",               {}),
+        ("/v1/trace/mt5/copy/historyList",              {}),
+        # ── Top-level copy paths ──────────────────────────────────────────────
+        ("/v1/copy/mt5/getStopCopyList",                {}),
+        ("/v1/copy/mt5/getCancelCopyList",              {}),
+        ("/v1/copy/mt5/getHistoryCopyList",             {}),
+        ("/v1/copy/mt5/copyHistoryList",                {}),
+        ("/v1/copy/getStopFollowList",                  {}),
+        ("/v1/copy/getCancelFollowList",                {}),
+        ("/v1/copy/getFollowHistoryList",               {}),
     ]
+
     results = []
-    for body in probes:
+    found = False
+    for ep, body in probes:
+        if found:
+            break
         try:
-            result = await page.evaluate("""async (body) => {
+            result = await page.evaluate("""async ([ep, body]) => {
                 try {
-                    const r = await fetch('/v1/trace/mt5/trace/getFollowPortfolios', {
+                    const r = await fetch(ep, {
                         method: 'POST', credentials: 'include',
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify(body),
@@ -735,21 +796,45 @@ async def _fetch_cancelled_copies(page, push_fn: Callable):
                     const j = JSON.parse(text);
                     const rows = j?.data?.portfolioDetails || j?.data?.rows || j?.data?.list || [];
                     return {status: r.status, code: j?.code, rows: rows.length,
-                            row0_keys: rows[0] ? Object.keys(rows[0]).slice(0, 12) : null,
+                            row0_keys: rows[0] ? Object.keys(rows[0]).slice(0, 15) : null,
                             data: j?.data};
                 } catch(e) { return {status: 0, error: String(e)}; }
-            }""", body)
-            code = result.get("code") if isinstance(result, dict) else None
-            results.append({"body": str(body), "http": result.get("status"),
-                            "code": code, "rows": result.get("rows")})
-            if result.get("status") == 200 and code in ("00000", "200", "0"):
+            }""", [ep, body])
+            http  = result.get("status") if isinstance(result, dict) else 0
+            code  = result.get("code")   if isinstance(result, dict) else None
+            err   = result.get("error")  if isinstance(result, dict) else None
+            n_rows = result.get("rows", 0)
+            results.append({"ep": ep, "body": str(body), "http": http,
+                             "code": code, "rows": n_rows, "error": err,
+                             "keys": result.get("row0_keys") if isinstance(result, dict) else None})
+
+            if err == "html_redirect":
+                _status["auth_ok"] = False
+                continue
+            if http == 404:
+                continue  # endpoint doesn't exist, skip
+            if http == 200 and code in ("00000", "200", "0"):
                 rows = _extract_rows(result.get("data"))
-                if rows and not any(k in rows[0] for k in _ACTIVE_KEYS):
-                    if _CANCEL_KEYS & set(rows[0].keys()):
-                        logger.info("Cancelled copies: %d entries body=%s", len(rows), body)
+                if rows and isinstance(rows[0], dict):
+                    row0_keys = set(rows[0].keys())
+                    if _CANCEL_KEYS & row0_keys and not (_ACTIVE_KEYS & row0_keys):
+                        logger.info("Cancelled copies FOUND: ep=%s body=%s rows=%d",
+                                    ep, body, len(rows))
                         push_fn("cancelled_copies", rows)
-                        _status["cancelled_copies_probe"] = {"strategy": "S1", "results": results}
+                        _status["cancelled_copies_probe"] = {
+                            "strategy": "blind_probe", "ep": ep, "body": str(body),
+                            "rows": len(rows), "results": results,
+                        }
+                        found = True
                         return
+                    elif rows:
+                        # Got data but wrong shape — log keys to help identify endpoint
+                        logger.info("Cancelled copies probe hit (wrong shape): ep=%s keys=%s",
+                                    ep, list(rows[0].keys())[:15])
         except Exception as e:
-            results.append({"body": str(body), "error": str(e)})
-    _status["cancelled_copies_probe"] = results
+            results.append({"ep": ep, "body": str(body), "error": str(e)})
+
+    if not found:
+        _status["cancelled_copies_probe"] = {"strategy": "blind_probe",
+                                              "found": False, "results": results}
+
