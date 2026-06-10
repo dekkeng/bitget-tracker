@@ -232,7 +232,7 @@ def _extract_positions(raw: Any) -> list:
         if isinstance(d, list):
             return d
         if isinstance(d, dict):
-            for key in ("list", "rows", "positions", "posList"):
+            for key in ("list", "rows", "positions", "posList", "data"):
                 v = d.get(key)
                 if isinstance(v, list) and v:
                     return v
@@ -566,29 +566,30 @@ def _push_data(kind: str, data, trader: str = None):
                         except (TypeError, ValueError):
                             pass
                 total += rpnl - pshare
-        _settings["cancelled_copy_pnl"] = round(total, 2)
-        _settings["cancelled_copy_count"] = len(rows)
-        _save_settings(_settings)
-        logger.info("Cancelled copies: %d entries, total net_profit=%.2f", len(rows), total)
+        new_pnl, new_count = round(total, 2), len(rows)
+        if (_settings.get("cancelled_copy_pnl") != new_pnl
+                or _settings.get("cancelled_copy_count") != new_count):
+            _settings["cancelled_copy_pnl"] = new_pnl
+            _settings["cancelled_copy_count"] = new_count
+            _save_settings(_settings)
+            logger.info("Cancelled copies: %d entries, total net_profit=%.2f", new_count, total)
     elif kind == "elite_trader":
         # Elite (lead) trader portfolio — data is a single portfolio dict
         row = data if isinstance(data, dict) else {}
         if not row:
             return
-        def _f(r, *keys):
-            for k in keys:
-                v = r.get(k)
-                if v not in (None, "", "0", 0):
-                    try: return float(v)
-                    except (TypeError, ValueError): pass
-            return 0.0
+        # Reject follower-portfolio shapes: those balances are already counted in
+        # the trader cards, so accepting one here would double-count it.
+        if any(k in row for k in ("marginCall", "credit", "connecting")):
+            logger.warning("Elite trader push rejected: row looks like a follower portfolio")
+            return
         # Fields from screenshot: equity, balance, aum, totalProfit, roi, copiers
-        balance     = _f(row, "balance", "equity", "totalBalance", "totalAsset")
-        all_time    = _f(row, "totalProfit", "allTimeProfit", "profit",
-                         "realizedPnl", "realPnl", "cumulativeProfit")
-        daily       = _f(row, "dailyProfit", "todayProfit", "dailyPnl",
-                         "dayProfit", "profit24h")
-        aum         = _f(row, "aum", "totalAum", "aumAmount")
+        balance     = _fv("balance", "equity", "totalBalance", "totalAsset", src=row)
+        all_time    = _fv("totalProfit", "allTimeProfit", "profit",
+                          "realizedPnl", "realPnl", "cumulativeProfit", src=row)
+        daily       = _fv("dailyProfit", "todayProfit", "dailyPnl",
+                          "dayProfit", "profit24h", src=row)
+        aum         = _fv("aum", "totalAum", "aumAmount", src=row)
         copiers_raw = row.get("copiers") or row.get("followerCount") or \
                       row.get("followCount") or row.get("currentFollowers") or "0"
         # copiers may be "0/100" string or a plain int
@@ -1006,13 +1007,16 @@ async def get_widget():
             stale = (datetime.now(BKK) - last).total_seconds() > 900
         except Exception:
             stale = False
+    # Include earn + elite balances so the widget matches the dashboard total
+    earn_total  = (_earn["data"] or {}).get("total", 0.0)
+    elite_total = (_elite["data"] or {}).get("balance", 0.0)
     return {
         "daily_pnl": s["daily_pnl"],
         "daily_pnl_pct": 0.0,
         "open_positions": s["open_positions"],
         "open_positions_pnl": s["open_positions_pnl"],
         "all_time_pnl": s["all_time_pnl"],
-        "total_balance": s["total_balance"],
+        "total_balance": round(s["total_balance"] + earn_total + elite_total, 2),
         "total_investment": s["total_investment"],
         "updated_at": pushed_at or datetime.now(BKK).strftime("%H:%M"),
         "stale": stale,
@@ -1143,9 +1147,11 @@ async def refresh_earn():
 @app.get("/api/elite")
 async def get_elite():
     data = _elite["data"] or {}
-    # Fall back to manually-set PnL from settings when no live data
+    # Manually-set PnL from settings is the fallback whenever live data lacks
+    # a usable value — keeps the card consistent with the summary, which
+    # always includes the settings value.
     settings_pnl = _settings.get("elite_all_time_pnl", 0.0)
-    all_time = data.get("all_time_pnl") if _elite["data"] else (settings_pnl or None)
+    all_time = data.get("all_time_pnl") or settings_pnl or None
     return {
         "balance": data.get("balance", 0.0),
         "all_time_pnl": all_time,

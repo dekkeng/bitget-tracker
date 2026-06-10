@@ -1143,9 +1143,9 @@
     } catch(e) { console.error('fetchElite', e); }
   }
 
-  async function editElitePnl() {
-    const cur = document.getElementById('elite-alltime').textContent;
-    const input = prompt('Enter Elite Portfolio realized P&L (e.g. -147.92):\nLeave blank to clear.', cur.replace(/[^0-9.\-]/g, ''));
+  // Shared tap-to-edit prompt for manual P&L overrides saved via /api/settings
+  async function editManualPnl(settingKey, promptLabel, currentText) {
+    const input = prompt(promptLabel + '\nLeave blank to clear.', currentText.replace(/[^0-9.\-]/g, ''));
     if (input === null) return;
     const val = input.trim() === '' ? 0 : parseFloat(input);
     if (isNaN(val)) { alert('Invalid number'); return; }
@@ -1153,12 +1153,16 @@
       const r = await fetch('/api/settings', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({elite_all_time_pnl: val}),
+        body: JSON.stringify({[settingKey]: val}),
       });
       if (!r.ok) { alert('Save failed: ' + r.status); return; }
-      await fetchElite();
-      await fetchData();
+      await Promise.allSettled([fetchElite(), fetchData()]);
     } catch(e) { alert('Error: ' + e.message); }
+  }
+
+  function editElitePnl() {
+    editManualPnl('elite_all_time_pnl', 'Enter Elite Portfolio realized P&L (e.g. -147.92):',
+                  document.getElementById('elite-alltime').textContent);
   }
 
   async function fetchEarn() {
@@ -1370,21 +1374,9 @@
     }
   }
 
-  async function editStoppedCopies() {
-    const cur = document.getElementById('stopped-copies-pnl').textContent;
-    const input = prompt('Enter net P&L for stopped copies (e.g. 450.50 or -120):\nLeave blank to clear.', cur.replace(/[^0-9.\-]/g, ''));
-    if (input === null) return;
-    const val = input.trim() === '' ? 0 : parseFloat(input);
-    if (isNaN(val)) { alert('Invalid number'); return; }
-    try {
-      const r = await fetch('/api/settings', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({cancelled_copy_pnl: val}),
-      });
-      if (!r.ok) { alert('Save failed: ' + r.status); return; }
-      await fetchData();
-    } catch(e) { alert('Error: ' + e.message); }
+  function editStoppedCopies() {
+    editManualPnl('cancelled_copy_pnl', 'Enter net P&L for stopped copies (e.g. 450.50 or -120):',
+                  document.getElementById('stopped-copies-pnl').textContent);
   }
 
   async function fetchTraders() {

@@ -824,13 +824,25 @@ _ELITE_KEYS = {"aum", "copiersPnl", "copiers", "followerCount", "followCount",
                "equity", "unrealizedProfitShare", "roi"}
 _elite_ep:     str | None = None
 _elite_method: str        = "POST"
+_ELITE_REPROBE_EVERY = 30   # full sweep is ~40 requests; only run it occasionally
+_elite_probe_count = 0
 
 
 async def _fetch_elite_trader(page, push_fn: Callable):
     """Find and fetch the user's own elite (lead) trader portfolio balance."""
-    global _elite_ep, _elite_method
+    global _elite_ep, _elite_method, _elite_probe_count
 
-    probes = [(_elite_method, _elite_ep)] if _elite_ep else _ELITE_PROBES
+    if _elite_ep:
+        probes = [(_elite_method, _elite_ep)]
+    else:
+        # No known endpoint: run the full sweep on the first poll, then only
+        # every _ELITE_REPROBE_EVERY polls — not 40 requests per cycle forever.
+        sweep_due = _elite_probe_count % _ELITE_REPROBE_EVERY == 0
+        _elite_probe_count += 1
+        if not sweep_due:
+            return
+        probes = _ELITE_PROBES
+    using_cache = _elite_ep is not None
     hits: list[dict] = []   # non-404 results for debugging
 
     for method, ep in probes:
@@ -880,7 +892,9 @@ async def _fetch_elite_trader(page, push_fn: Callable):
             if not isinstance(row, dict):
                 continue
             row_keys = set(row.keys())
-            if _ELITE_KEYS & row_keys:
+            # Active follower portfolios also carry equity/totalProfit-style keys;
+            # accepting one would double-count a balance already on a trader card.
+            if (_ELITE_KEYS & row_keys) and not (_ACTIVE_KEYS & row_keys):
                 _elite_ep     = ep
                 _elite_method = method
                 _status["elite_probe"] = {"found": True, "method": method, "ep": ep,
@@ -894,5 +908,10 @@ async def _fetch_elite_trader(page, push_fn: Callable):
                 logger.info("Elite probe 200 wrong shape: %s %s keys=%s",
                             method, ep, list(row_keys)[:20])
 
+    if using_cache:
+        # Cached endpoint stopped returning usable data — clear it and let the
+        # next poll run a full sweep to rediscover.
+        _elite_ep = None
+        _elite_probe_count = 0
     _status["elite_probe"] = {"found": False, "hits": hits}
 
