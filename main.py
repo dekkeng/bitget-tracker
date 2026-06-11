@@ -311,6 +311,8 @@ def _parse_trades(raw: Any) -> list[dict]:
                 "pnl": round(_fv("totalProfit", "profit", "realizedPL", "realizedPnl",
                                  "realizedPNL", "pnl", src=h), 4),
                 "commission": round(abs(_fv("commission", "fee", "tradeFee", src=h)), 4),
+                "profit_share": round(abs(_fv("profitShare", "profitShareAmount",
+                                              "profitSharingAmount", "shareAmount", src=h)), 4),
                 "close_time_ms": ct,
             })
         except (TypeError, ValueError):
@@ -474,6 +476,16 @@ def _push_data(kind: str, data, trader: str = None):
                         changed = True
                     except (TypeError, ValueError):
                         pass
+            for key in ("profitShareAmount", "profitSharingAmount", "totalProfitShare",
+                        "paidProfitShare", "realizedProfitShare", "settledProfitShare",
+                        "profitShare", "shareAmount"):
+                if key in data:
+                    try:
+                        ts["profit_share"] = round(abs(float(data[key])), 2)
+                        changed = True
+                    except (TypeError, ValueError):
+                        pass
+                    break
             for key in ("totalInvestment", "total_investment", "investment"):
                 if key in data:
                     try:
@@ -666,6 +678,13 @@ def _rebuild_trader_summary(name: str) -> dict:
     scraped_pnl = ts.get("realized_pnl", 0.0)
     all_time_pnl = scraped_pnl if scraped_pnl != 0.0 else trades_pnl
 
+    # Profit share paid to the trader: prefer the portfolio-level scrape,
+    # fall back to summing per-trade share amounts from history
+    profit_share = ts.get("profit_share", 0.0)
+    if not profit_share:
+        profit_share = round(sum(t.get("profit_share", 0.0) for t in trades), 2)
+    net_all_time_pnl = round(all_time_pnl - profit_share, 4)
+
     scraped_balance = ts.get("balance", 0.0)
     investment      = ts.get("investment", 0.0)
     open_pnl        = ts.get("open_pnl", 0.0)
@@ -689,7 +708,9 @@ def _rebuild_trader_summary(name: str) -> dict:
         "balance": balance,
         "investment": investment,
         "daily_pnl": round(daily_pnl, 4),
-        "all_time_pnl": round(all_time_pnl, 4),
+        "all_time_pnl": net_all_time_pnl,
+        "gross_all_time_pnl": round(all_time_pnl, 4),
+        "profit_share": round(profit_share, 2),
         "open_positions_pnl": open_pnl,
         "open_position_count": open_pos_count,
         "pushed_at": tc["pushed_at"],

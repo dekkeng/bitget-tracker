@@ -1343,7 +1343,7 @@
       const ccPnl = mt5.cancelled_copy_pnl;
       const ccCount = mt5.cancelled_copy_count;
       if (ccPnl != null && Math.abs(ccPnl) >= 0.01) {
-        ccNote.textContent = `incl. ${fmt(ccPnl)} from ${ccCount > 0 ? ccCount : '?'} stopped cop${ccCount === 1 ? 'y' : 'ies'}`;
+        ccNote.textContent = 'incl. PL from stopped copies';
         ccNote.style.display = '';
       } else {
         ccNote.style.display = 'none';
@@ -1395,6 +1395,11 @@
         const dStr   = hasData ? fmt(t.daily_pnl) : '—';
         const oCls   = hasData ? colorClass(t.open_positions_pnl) : '';
         const oStr   = hasData ? fmt(t.open_positions_pnl) : '—';
+        const psHtml = (hasData && t.profit_share > 0) ? `
+              <div>
+                <div class="trader-metric-label">Shared</div>
+                <div class="trader-metric-val red">${fmt(-t.profit_share)}</div>
+              </div>` : '';
         const typeCls   = t.type === 'futures' ? 'futures' : 'cfd';
         const typeLabel = t.type === 'futures' ? 'FUTURES' : 'CFD';
         const _tBase    = hasData ? (t.investment > 0 ? t.investment : t.balance) : 0;
@@ -1421,12 +1426,12 @@
               <div>
                 <div class="trader-metric-label">Open</div>
                 <div class="trader-metric-val ${oCls}">${oStr}</div>
-              </div>
+              </div>${psHtml}
             </div>
           </div>
           <div class="trader-right">
             <div class="trader-updated">${t.pushed_at || (hasData ? '' : 'waiting')}</div>
-            <div class="trader-alltime ${atCls}">${atStr}</div>
+            <div class="trader-alltime ${atCls}" title="Net of profit share">${atStr}</div>
             ${atBadge}
           </div>
         </div>`;
