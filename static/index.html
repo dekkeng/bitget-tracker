@@ -547,6 +547,7 @@
       <div class="stat-card">
         <div class="stat-label">Open PnL</div>
         <div id="open-pnl" class="stat-val">—</div>
+        <div id="live-price-chip" style="display:none;font-size:9px;color:var(--muted);margin-top:2px;letter-spacing:0.3px"></div>
         <span id="open-pnl-badge" class="trend-badge flat" style="display:none"></span>
       </div>
       <div class="stat-card">
@@ -1040,7 +1041,7 @@
       return `<tr>
         <td><strong>${p.symbol}</strong><br><span class="side-badge ${p.side}">${p.side.toUpperCase()}</span></td>
         <td class="mono" style="text-align:right">${p.size}<br><span style="font-size:10px;color:var(--muted)">@${p.entry_price.toFixed(2)}</span></td>
-        <td class="mono ${cls}" style="text-align:right;font-weight:600">${fmt(p.unrealized_pnl)}</td>
+        <td class="mono ${cls}" style="text-align:right;font-weight:600">${fmt(p.unrealized_pnl)}${p.live ? `<br><span style="font-size:9px;color:var(--muted);font-weight:400">→ ${p.live_price.toFixed(2)} live</span>` : ''}</td>
       </tr>`;
     }).join('');
     el.innerHTML = `<table class="data-table">
@@ -1193,6 +1194,65 @@
   }
 
   let _lastMt5 = null;
+  let _lastPositions = [];   // last scraped open positions (kept across failed polls)
+  let _livePrices = {};      // symbol -> live price from /api/prices
+  let _liveOpenDelta = 0;    // live uPnL minus scraped uPnL, folded into balance
+  // Contract size per 1.0 lot — CFD convention (0.01 lot XAUUSD = 1 oz)
+  const LOT_MULT = { XAUUSD: 100, XAGUSD: 5000 };
+
+  // Recompute uPnL from live public prices: (live − entry) × size × lot mult.
+  // Positions without a live price / known multiplier keep the scraped value.
+  function livePositions() {
+    return _lastPositions.map(p => {
+      const sym = (p.symbol || '').toUpperCase();
+      const price = _livePrices[sym], mult = LOT_MULT[sym];
+      if (!price || !mult || !p.entry_price || !p.size) return { ...p, live: false };
+      const dir = p.side === 'short' ? -1 : 1;
+      const pnl = (price - p.entry_price) * p.size * mult * dir;
+      return { ...p, unrealized_pnl: Math.round(pnl * 100) / 100, live: true, live_price: price };
+    });
+  }
+
+  function applyLivePnl() {
+    const pos = livePositions();
+    if (!pos.some(p => p.live)) return;
+    renderPositions(pos);
+    const liveTotal = pos.reduce((s, p) => s + (p.unrealized_pnl || 0), 0);
+    const scrapedTotal = _lastPositions.reduce((s, p) => s + (p.unrealized_pnl || 0), 0);
+    _liveOpenDelta = liveTotal - scrapedTotal;
+
+    const opEl = document.getElementById('open-pnl');
+    opEl.textContent = fmt(liveTotal);
+    opEl.className = 'stat-val ' + colorClass(liveTotal);
+    const ob = document.getElementById('open-pnl-badge');
+    if (Math.abs(liveTotal) >= 0.01) {
+      ob.textContent = liveTotal > 0 ? '↑ Profit' : '↓ Loss';
+      ob.className = 'trend-badge ' + (liveTotal > 0 ? 'up' : 'down');
+      ob.style.display = 'inline-flex';
+    } else {
+      ob.style.display = 'none';
+    }
+
+    const chip = document.getElementById('live-price-chip');
+    const gold = _livePrices['XAUUSD'];
+    if (gold) {
+      chip.textContent = 'XAU ' + gold.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' · live';
+      chip.style.display = 'block';
+    }
+    renderBalance();
+  }
+
+  async function fetchPrices() {
+    if (document.hidden || !_lastPositions.length) return;
+    try {
+      const j = await fetch('/api/prices').then(r => r.json());
+      if (j && j.prices && Object.keys(j.prices).length) {
+        _livePrices = j.prices;
+        applyLivePnl();
+      }
+    } catch (e) { /* best-effort — keep scraped values */ }
+  }
+  setInterval(fetchPrices, 5_000);
 
   // Renders balance, return % and goal ring from the last mt5 summary plus
   // earn/elite totals. Called again by fetchEarn/fetchElite so the total
@@ -1200,7 +1260,7 @@
   function renderBalance() {
     const mt5 = _lastMt5;
     if (!mt5) return 0;
-    const displayBalance = (mt5.total_balance || 0) + _earnTotal + _eliteTotal;
+    const displayBalance = (mt5.total_balance || 0) + _earnTotal + _eliteTotal + _liveOpenDelta;
     document.getElementById('total-balance').textContent = fmtBal(displayBalance);
     document.getElementById('total-investment').textContent = fmtBal(mt5.total_investment);
 
@@ -1264,6 +1324,11 @@
       connBanner.style.display = 'none';
       const mt5       = results[0].value;
       const positions = results[1].status === 'fulfilled' ? results[1].value : [];
+      if (results[1].status === 'fulfilled' && Array.isArray(positions)) {
+        _lastPositions = positions;
+        _liveOpenDelta = 0;  // fresh scrape re-baselines the live adjustment
+        if (!positions.length) document.getElementById('live-price-chip').style.display = 'none';
+      }
       const trades    = results[2].status === 'fulfilled' ? results[2].value : [];
       const history   = results[3].status === 'fulfilled' ? results[3].value : [];
 
@@ -1364,6 +1429,8 @@
       }
 
       renderPositions(positions);
+      applyLivePnl();   // re-apply cached live prices over the fresh scrape
+      fetchPrices();    // then refresh prices immediately
       renderTrades(trades);
       drawChart(history);
       wireChartHover();

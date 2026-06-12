@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -11,6 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -913,6 +915,76 @@ async def get_mt5_positions_raw():
             "row_count": len(rows),
             "row0_keys": list(rows[0].keys())[:30] if rows and isinstance(rows[0], dict) else None,
             "row0": rows[0] if rows else None}
+
+
+# --- Live public-market prices (no auth — works even when the cookie is dead) ---
+# MT5 CFD symbol -> Bitget public perp symbol
+_PRICE_SYMBOL_MAP = {
+    "XAUUSD": "XAUUSDT",
+    "XAGUSD": "XAGUSDT",
+    "BTCUSD": "BTCUSDT",
+    "ETHUSD": "ETHUSDT",
+}
+_price_cache: dict[str, dict] = {}  # CFD symbol -> {"price": float, "ts": float}
+_PRICE_TTL = 3.0
+
+
+async def _fetch_public_price(client: httpx.AsyncClient, bg_symbol: str) -> float | None:
+    # Gold/silver trade as USDT perps on Bitget; spot is the fallback
+    try:
+        r = await client.get("https://api.bitget.com/api/v2/mix/market/ticker",
+                             params={"symbol": bg_symbol, "productType": "USDT-FUTURES"})
+        d = r.json().get("data")
+        if isinstance(d, list) and d:
+            d = d[0]
+        if isinstance(d, dict):
+            v = d.get("lastPr") or d.get("last") or d.get("close")
+            if v:
+                return float(v)
+    except Exception:
+        pass
+    try:
+        r = await client.get("https://api.bitget.com/api/v2/spot/market/tickers",
+                             params={"symbol": bg_symbol})
+        d = r.json().get("data")
+        if isinstance(d, list) and d:
+            v = d[0].get("lastPr") or d[0].get("close")
+            if v:
+                return float(v)
+    except Exception:
+        pass
+    return None
+
+
+@app.get("/api/prices")
+async def get_prices():
+    """Live prices for symbols in the current open positions.
+
+    The dashboard uses these to recompute unrealized PnL between scraper
+    polls — and while the cookie is expired, since this needs no auth.
+    """
+    positions = _parse_positions(_mt5["positions_raw"])
+    symbols = sorted({(p.get("symbol") or "").upper() for p in positions} - {""})
+    if not symbols:
+        symbols = ["XAUUSD"]  # only instrument traded so far
+    now = time.time()
+    out = {}
+    async with httpx.AsyncClient(timeout=8) as client:
+        for sym in symbols:
+            bg = _PRICE_SYMBOL_MAP.get(sym)
+            if not bg:
+                continue
+            cached = _price_cache.get(sym)
+            if cached and now - cached["ts"] < _PRICE_TTL:
+                out[sym] = cached["price"]
+                continue
+            price = await _fetch_public_price(client, bg)
+            if price:
+                _price_cache[sym] = {"price": price, "ts": now}
+                out[sym] = price
+            elif cached:
+                out[sym] = cached["price"]
+    return {"prices": out, "ts": datetime.now(timezone.utc).isoformat()}
 
 
 @app.get("/api/mt5/trades")
