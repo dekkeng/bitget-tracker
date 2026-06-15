@@ -829,6 +829,7 @@
   }
 
   let lastFetchTime = null, ageInterval = null;
+  let _lastScrapeMs = null;  // when poller last got data from Bitget
 
   function fmt(n, digits = 2) {
     if (n == null) return '—';
@@ -847,10 +848,13 @@
     clearInterval(ageInterval);
     const el = document.getElementById('last-updated');
     ageInterval = setInterval(() => {
-      if (!lastFetchTime) return;
-      const s = Math.floor((Date.now() - lastFetchTime) / 1000);
-      el.textContent = s < 10 ? 'live' : s < 120 ? s + 's' : Math.floor(s / 60) + 'm';
-      el.className = s > 120 ? 'stale' : '';
+      // Prefer scrape age (when Bitget last responded to cookie) over dashboard fetch age
+      const ref = _lastScrapeMs || lastFetchTime;
+      if (!ref) return;
+      const s = Math.floor((Date.now() - ref) / 1000);
+      const label = _lastScrapeMs ? 'data ' : '';
+      el.textContent = s < 10 ? label + 'live' : s < 120 ? label + s + 's ago' : label + Math.floor(s / 60) + 'm ago';
+      el.className = s > 90 ? 'stale' : '';
     }, 1000);
   }
 
@@ -1703,11 +1707,17 @@
       else if (cookieExpired || s.last_error)                     dot.className = 'err';
       else if (s.browser_alive || (s.polls > 0 && s.pushes > 0)) dot.className = 'ok';
       else                                                        dot.className = 'warn';
+
+      // Update scrape-age ticker with the exact epoch ms from the poller
+      if (s.last_scrape_ms) {
+        _lastScrapeMs = s.last_scrape_ms;
+        if (!ageInterval) startAgeTicker();
+      }
     } catch (_) {}
   }
 
   updatePollerStatus();
-  setInterval(updatePollerStatus, 15_000);
+  setInterval(updatePollerStatus, 10_000);
 
   // Traders modal
   const tradersModal = document.getElementById('traders-modal');

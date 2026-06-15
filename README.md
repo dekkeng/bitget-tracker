@@ -15,7 +15,7 @@ flowchart TD
 
     subgraph RENDER ["Render.com — Free Web Service"]
         C["⚙️ FastAPI Server\nmain.py\n• stores data in memory\n• serves dashboard + API"]
-        D["🤖 Browser Poller\nPlaywright + Chromium\n• runs every 2 minutes\n• injects session cookie"]
+        D["🤖 Browser Poller\nPlaywright + Chromium\n• runs every 30 seconds\n• injects session cookie"]
     end
 
     subgraph BITGET ["Bitget"]
@@ -91,7 +91,7 @@ Note down each `portfolioId` and the name of the trader you're copying.
 | Variable | Value | Required |
 |----------|-------|----------|
 | `TRADERS` | `TraderName:portfolioId` | **Yes** |
-| `POLL_INTERVAL_SEC` | `120` | No (default: 120 s) |
+| `POLL_INTERVAL_SEC` | `30` | No (default: 30 s) |
 | `BITGET_API_KEY` | your Bitget API key | No (earn/deposits only) |
 | `BITGET_API_SECRET` | your Bitget API secret | No |
 | `BITGET_API_PASSPHRASE` | your Bitget passphrase | No |
@@ -121,7 +121,7 @@ TRADERS=FutureTrader:1427930164156649472:futures
 4. Open your dashboard → scroll to **Polling Setup**
 5. Paste the cookie string → **Save**
 
-The poller starts on the next 2-minute cycle. You'll see live data within ~2 minutes.
+The poller starts on the next 30-second cycle. You'll see live data within ~1 minute.
 
 > **Cookie TTL:** The `bt_newsessionid` JWT expires after ~5 days. When `/api/poller` shows `auth_ok: false`, repeat this step to refresh it.
 
@@ -186,7 +186,7 @@ To create API keys:
 |---------|-----|
 | Dashboard shows "—" everywhere | Check `/api/poller` — if `has_cookie: false`, paste your cookie first |
 | `auth_ok: false` in poller | Cookie expired — re-paste a fresh one from Chrome DevTools |
-| "No open positions" when trades are active | Wait one poll cycle (up to 2 min); position endpoint is probed dynamically |
+| "No open positions" when trades are active | Wait one poll cycle (up to ~60s); position endpoint is probed early in each cycle |
 | Stopped trader still in cards | Refresh dashboard — next poll moves them to Stopped Copies automatically |
 | Widget shows "⚠ stale" | Server woke from sleep — pull to refresh; widget catches up next cycle |
 | Render build fails | Ensure `Dockerfile` and `render.yaml` are in the root of your fork |

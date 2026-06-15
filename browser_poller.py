@@ -30,6 +30,7 @@ _status = {
     "browser_alive": False,
     "last_poll": None,
     "last_scrape": None,
+    "last_scrape_ms": None,
     "last_error": None,
     "polls": 0,
     "scrapes": 0,
@@ -73,6 +74,13 @@ def _load_traders() -> tuple[dict[str, str], dict[str, str]]:
         traders[name0] = os.environ.get("PORTFOLIO_ID", "1443199880395776000")
         types[name0]   = "cfd"
     return traders, types
+
+
+def _mark_scrape() -> None:
+    now = datetime.now(BKK)
+    _status["last_scrape"] = now.strftime("%Y-%m-%d %H:%M:%S")
+    _status["last_scrape_ms"] = int(now.timestamp() * 1000)
+    _status["scrapes"] += 1
 
 
 def reset_auth_status() -> None:
@@ -512,8 +520,7 @@ async def _fetch_cfd_balances(page, push_fn: Callable, cfd_traders: dict):
                     push_fn("copy_details", portfolio, trader_name)
                     matched += 1
             if matched > 0:
-                _status["scrapes"] += 1
-                _status["last_scrape"] = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
+                _mark_scrape()
                 return
     except Exception as e:
         logger.warning("CFD getFollowPortfolios all error: %s", e)
@@ -545,8 +552,7 @@ async def _fetch_cfd_balances(page, push_fn: Callable, cfd_traders: dict):
                 details = (result.get("data") or {}).get("portfolioDetails") or []
                 if details and isinstance(details[0], dict):
                     push_fn("copy_details", details[0], trader_name)
-                    _status["last_scrape"] = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
-                    _status["scrapes"] += 1
+                    _mark_scrape()
         except Exception as e:
             logger.warning("CFD getFollowPortfolios[%s] error: %s", trader_name, e)
 
@@ -607,8 +613,7 @@ async def _fetch_futures_balance(page, push_fn: Callable, trader_name: str, pid:
                             data.get("list") or data.get("rows") or []) if raw_data else []
                 if isinstance(details, list) and details:
                     push_fn("copy_details", details[0], trader_name)
-                    _status["scrapes"] += 1
-                    _status["last_scrape"] = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
+                    _mark_scrape()
                     _status[f"futures_balance_{trader_name}"] = results
                     break  # found data, stop probing
                 elif isinstance(pos_list, list) and pos_list:
@@ -616,14 +621,12 @@ async def _fetch_futures_balance(page, push_fn: Callable, trader_name: str, pid:
                                          p.get("unrealizedPL") or 0) for p in pos_list
                                     if isinstance(p, dict))
                     push_fn("copy_details", {"floatProfit": total_upl}, trader_name)
-                    _status["scrapes"] += 1
-                    _status["last_scrape"] = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
+                    _mark_scrape()
                     _status[f"futures_balance_{trader_name}"] = results
                     break  # found data, stop probing
                 elif isinstance(data, dict) and data:
                     push_fn("copy_details", data, trader_name)
-                    _status["scrapes"] += 1
-                    _status["last_scrape"] = datetime.now(BKK).strftime("%Y-%m-%d %H:%M:%S")
+                    _mark_scrape()
                     _status[f"futures_balance_{trader_name}"] = results
                     break  # found data, stop probing
                 # data was empty — continue to next probe
