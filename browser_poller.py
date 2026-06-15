@@ -285,6 +285,8 @@ async def _probe_positions(page, push_fn: Callable,
                 if isinstance(result, dict) and result.get("status") == 200 and code in ("00000", "200", "0"):
                     logger.info("CFD positions found ep=%s body=%s rows=%s",
                                 ep, label, result.get("row_count"))
+                    _status["auth_ok"] = True
+                    _mark_scrape()  # cookie is alive — update timer immediately
                     push_fn("positions", result.get("data") or {})
                     pos_found = True
                     break
@@ -368,6 +370,8 @@ async def _poll_cfd_history(page, push_fn: Callable, trader_name: str, pid: str)
                 break
 
             _status["auth_ok"] = True
+            if batch == 0:
+                _mark_scrape()  # first successful history batch — cookie is alive
             raw_data = hist.get("data") or {}
             rows = _extract_rows(raw_data)
             if not rows:
