@@ -1,0 +1,38 @@
+name: Refresh Bitget cookie
+
+# Silently renews the Bitget session cookie and pushes it to the tracker.
+# Runs on a schedule; if the silent refresh fails (session truly expired),
+# the job fails and GitHub emails you to run a full `npm run login` by hand.
+
+on:
+  schedule:
+    # Twice a day (00:00 and 12:00 UTC). Cookie lives ~5 days, so this keeps
+    # it comfortably renewed. Cron times are UTC and may drift a few minutes.
+    - cron: '0 0,12 * * *'
+  workflow_dispatch: {}   # allow manual "Run workflow" from the Actions tab
+
+concurrency:
+  group: refresh-cookie
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install headless deps
+        working-directory: headless
+        run: npm install --no-audit --no-fund
+
+      - name: Refresh and push cookie
+        working-directory: headless
+        env:
+          TRACKER_URL: ${{ secrets.TRACKER_URL }}
+          COOKIE_SYNC_TOKEN: ${{ secrets.COOKIE_SYNC_TOKEN }}
+        run: node refresh-and-push.js

@@ -7,3 +7,4 @@ cookies.json
 headless/browser-data/
 headless/node_modules/
 headless/.env
+headless/data/

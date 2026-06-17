@@ -5,10 +5,14 @@
   "main": "scraper.js",
   "scripts": {
     "start": "node scraper.js",
-    "login": "node login.js"
+    "login": "node login.js",
+    "push-cookie": "node push-cookie.js",
+    "refresh": "node refresh-and-push.js"
   },
   "dependencies": {
     "puppeteer": "^23.0.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "dotenv": "^16.4.0"
   }
 }

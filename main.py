@@ -8,8 +8,11 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
+import hmac
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import httpx
@@ -21,6 +24,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BKK = timezone(timedelta(hours=7))
+
+
+def _constant_time_eq(a: str, b: str) -> bool:
+    return hmac.compare_digest(a.encode(), b.encode())
+
+
 SETTINGS_FILE    = Path(os.environ.get("SETTINGS_PATH", "settings.json"))
 COOKIES_FILE     = Path(os.environ.get("COOKIES_PATH", "cookies.json"))
 TRADERS_FILE     = Path(os.environ.get("TRADERS_PATH", "traders.json"))
@@ -1377,6 +1386,28 @@ async def clear_poller_cookie():
     if COOKIES_FILE.exists():
         COOKIES_FILE.unlink()
     return {"ok": True}
+
+
+@app.get("/api/poller/cookie/export")
+async def export_poller_cookie(request: Request):
+    """Return the full cookie string so an external refresher (GitHub Actions /
+    local script) can load it, renew the Bitget session, and POST it back.
+
+    Disabled unless COOKIE_SYNC_TOKEN is set. The caller must present the same
+    token via the X-Sync-Token header or ?token= query param. The cookie is a
+    live session secret, so we never log it and never expose it without a token.
+    """
+    expected = os.environ.get("COOKIE_SYNC_TOKEN", "")
+    if not expected:
+        return JSONResponse({"ok": False, "error": "export disabled"}, status_code=404)
+    provided = request.headers.get("x-sync-token") or request.query_params.get("token") or ""
+    if not _constant_time_eq(provided, expected):
+        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=403)
+    from browser_poller import _load_cookie_string
+    cookie = _load_cookie_string()
+    if not cookie:
+        return JSONResponse({"ok": False, "error": "no cookie set"}, status_code=404)
+    return {"ok": True, "cookie": cookie, "length": len(cookie)}
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
