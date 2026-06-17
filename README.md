@@ -13,6 +13,10 @@ flowchart TD
         B["🖥 Browser Dashboard\n(any device)"]
     end
 
+    subgraph GH ["GitHub Actions (free)"]
+        H["🔄 Cookie Refresher\ncron × 2 per day\nverifies + renews session"]
+    end
+
     subgraph RENDER ["Render.com — Free Web Service"]
         C["⚙️ FastAPI Server\nmain.py\n• stores data in memory\n• serves dashboard + API"]
         D["🤖 Browser Poller\nPlaywright + Chromium\n• runs every 30 seconds\n• injects session cookie"]
@@ -31,11 +35,12 @@ flowchart TD
     E -->|"portfolio balance\nclosed trades\nopen positions"| D
     C -->|"live price\nevery 5 s"| F
     C -->|"earn balance\ndeposit history"| G
+    H -->|"1. pull current cookie\n2. verify auth\n3. push renewed cookie"| C
 ```
 
 **Key points:**
 - No Bitget API key required for core tracking — it works via your browser session cookie
-- The cookie has a ~5 day TTL; paste a fresh one when the dashboard shows stale data
+- The cookie has a ~5 day TTL; GitHub Actions refreshes it automatically twice a day
 - The public price feed (XAU/USD) stays live even when your cookie expires, so open position PnL is always current
 - Render's free tier sleeps after 15 min of inactivity — use UptimeRobot to keep it awake
 
@@ -53,9 +58,7 @@ flowchart TD
 
 ### Step 2 — Find your Portfolio IDs
 
-Each copy-trading portfolio on Bitget has a unique ID tied to your account. You need these to configure the tracker.
-
-**How to find them:**
+Each copy-trading portfolio on Bitget has a unique ID tied to your account.
 
 1. Log in to [bitget.com](https://bitget.com) in Chrome
 2. Go to **Copy Trading → My Copies**
@@ -64,7 +67,6 @@ Each copy-trading portfolio on Bitget has a unique ID tied to your account. You 
 5. Look for a request named **`getFollowPortfolios`**
 6. Click it → **Response** tab → find `portfolioId` under each copy entry
 
-You'll see something like:
 ```json
 {
   "data": {
@@ -76,7 +78,7 @@ You'll see something like:
 }
 ```
 
-Note down each `portfolioId` and the name of the trader you're copying.
+Note each `portfolioId` and the trader name you're copying.
 
 ---
 
@@ -85,12 +87,13 @@ Note down each `portfolioId` and the name of the trader you're copying.
 1. Go to [render.com](https://render.com) and sign up (free)
 2. Click **New → Web Service**
 3. Connect your GitHub account → select your forked repo
-4. Render detects `render.yaml` automatically — it configures a Docker deployment on the free tier
+4. Render detects `render.yaml` automatically
 5. Under **Environment Variables**, add:
 
 | Variable | Value | Required |
 |----------|-------|----------|
 | `TRADERS` | `TraderName:portfolioId` | **Yes** |
+| `COOKIE_SYNC_TOKEN` | random secret (see Step 5) | No (enables auto-refresh) |
 | `POLL_INTERVAL_SEC` | `30` | No (default: 30 s) |
 | `BITGET_API_KEY` | your Bitget API key | No (earn/deposits only) |
 | `BITGET_API_SECRET` | your Bitget API secret | No |
@@ -98,7 +101,7 @@ Note down each `portfolioId` and the name of the trader you're copying.
 
 **`TRADERS` format:**
 ```
-# Single trader
+# Single CFD trader
 TRADERS=TraderName:1234567890123456789
 
 # Multiple traders (comma-separated)
@@ -115,19 +118,48 @@ TRADERS=FuturesTrader:1234567890123456789:futures
 
 ### Step 4 — Paste your Bitget session cookie
 
+The tracker needs your Bitget browser session to call its internal APIs. You provide this by copying your cookie from Chrome.
+
+**Option A — Console (fastest):**
 1. Log in to [bitget.com](https://bitget.com) in Chrome
 2. Open DevTools (F12) → **Console** tab
-3. Run: `copy(document.cookie)`  ← this copies the cookie to your clipboard
+3. Run: `copy(document.cookie)` ← copies to clipboard instantly
+
+**Option B — Network tab:**
+1. Open DevTools → **Network** tab → reload the page
+2. Click any request to `bitget.com` → **Headers** → **Request Headers**
+3. Find the `cookie:` line → right-click the value → **Copy value**
+
+Then:
 4. Open your dashboard → scroll to **Polling Setup**
 5. Paste the cookie string → **Save**
 
 The poller starts on the next 30-second cycle. You'll see live data within ~1 minute.
 
-> **Cookie TTL:** The `bt_newsessionid` JWT expires after ~5 days. When `/api/poller` shows `auth_ok: false`, repeat this step to refresh it.
+> **Cookie TTL:** `bt_newsessionid` expires after ~5 days. Set up the GitHub Actions auto-refresh below to handle renewal automatically.
 
 ---
 
-### Step 5 — Keep it awake (UptimeRobot)
+### Step 5 — Auto-refresh the cookie (GitHub Actions)
+
+Without this step you must manually re-paste the cookie every ~5 days. The GitHub Actions workflow refreshes it automatically twice a day.
+
+> See **[`headless/AUTO-REFRESH.md`](headless/AUTO-REFRESH.md)** for the full setup guide (5 minutes, one-time).
+
+**Quick summary:**
+
+1. Generate a token: `openssl rand -hex 32`
+2. **Render** → add env var `COOKIE_SYNC_TOKEN` = that token
+3. **GitHub** → repo Settings → Secrets and variables → Actions → add:
+   - `TRACKER_URL` = `https://YOUR-SERVICE-NAME.onrender.com`
+   - `COOKIE_SYNC_TOKEN` = same token
+4. Paste one fresh cookie first (Step 4), then let the Action take over
+
+The workflow runs at 00:00 and 12:00 UTC. If the session is dead and can't be renewed automatically, the Action fails and GitHub emails you — the signal to do a fresh paste.
+
+---
+
+### Step 6 — Keep it awake (UptimeRobot)
 
 Render's free tier puts your service to sleep after 15 minutes with no traffic.
 
@@ -138,11 +170,11 @@ Render's free tier puts your service to sleep after 15 minutes with no traffic.
 
 ---
 
-### Step 6 — iPhone widget (optional)
+### Step 7 — iPhone widget (optional)
 
 1. Install **Scriptable** from the App Store (free)
 2. Open Scriptable → tap **+** → paste the entire contents of `scriptable/widget.js`
-3. Edit line 1 of the script — set the URL to your Render service:
+3. Edit line 1 — set your Render URL:
    ```js
    const SERVER = "https://YOUR-SERVICE-NAME.onrender.com";
    ```
@@ -157,7 +189,7 @@ The widget auto-refreshes every 5–15 minutes in the background.
 ## Optional: Bitget API keys (earn + deposit tracking)
 
 Without API keys the tracker still shows all copy trading data. API keys add:
-- **Earn balance** (flexible savings) shown as a separate card
+- **Earn balance** (flexible savings — USDT + USDC shown separately)
 - **Deposit/withdrawal history** for net investment tracking
 
 To create API keys:
@@ -173,10 +205,11 @@ To create API keys:
 | URL | Description |
 |-----|-------------|
 | `/` | Main dashboard |
-| `/api/poller` | Scraper status — `auth_ok`, last poll, cookie health |
+| `/api/poller` | Scraper status — `auth_ok`, last scrape, cookie health |
 | `/api/mt5` | Portfolio summary (JSON) |
 | `/api/mt5/debug` | Raw cached data — useful for diagnosing field names |
 | `/api/prices` | Live XAU/USD price (public, no auth) |
+| `/api/earn` | Earn balance (requires API key) |
 
 ---
 
@@ -184,9 +217,11 @@ To create API keys:
 
 | Symptom | Fix |
 |---------|-----|
-| Dashboard shows "—" everywhere | Check `/api/poller` — if `has_cookie: false`, paste your cookie first |
+| Dashboard shows "—" everywhere | Check `/api/poller` — if `has_cookie: false`, paste your cookie (Step 4) |
 | `auth_ok: false` in poller | Cookie expired — re-paste a fresh one from Chrome DevTools |
-| "No open positions" when trades are active | Wait one poll cycle (up to ~60s); position endpoint is probed early in each cycle |
-| Stopped trader still in cards | Refresh dashboard — next poll moves them to Stopped Copies automatically |
+| `last_scrape: null` after several polls | Same as above — cookie is dead, re-paste |
+| "No open positions" when trades are active | Wait one poll cycle (~30 s); position probe runs at the start of each cycle |
+| Stopped trader still showing in cards | Refresh — next poll moves it to Stopped Copies automatically |
 | Widget shows "⚠ stale" | Server woke from sleep — pull to refresh; widget catches up next cycle |
 | Render build fails | Ensure `Dockerfile` and `render.yaml` are in the root of your fork |
+| GitHub Action fails / you get an email | Cookie has expired — re-paste manually (Step 4), then the next Action run will succeed |
