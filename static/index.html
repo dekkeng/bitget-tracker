@@ -639,6 +639,7 @@
               <div class="trader-metric-label">Balance</div>
               <div class="trader-metric-val green" id="earn-balance">—</div>
             </div>
+            <div id="earn-breakdown"></div>
           </div>
         </div>
         <div class="trader-right">
@@ -1185,6 +1186,18 @@
       renderBalance();
       document.getElementById('earn-balance').textContent =
         '$' + earn.total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      // Per-coin breakdown — shown when more than one coin in earn
+      const bdEl = document.getElementById('earn-breakdown');
+      if (earn.items && earn.items.length > 1) {
+        bdEl.innerHTML = earn.items.map(it =>
+          `<div style="margin-left:12px">
+            <div class="trader-metric-label">${it.coin}</div>
+            <div class="trader-metric-val green">$${it.amount.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+          </div>`
+        ).join('');
+      } else {
+        bdEl.innerHTML = '';
+      }
       // Interest display — prefer total earned, fall back to 24h
       const intEl    = document.getElementById('earn-interest');
       const intLabel = document.getElementById('earn-interest-label');

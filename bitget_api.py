@@ -300,7 +300,17 @@ async def fetch_earn_balance(api_key: str, secret: str, passphrase: str) -> dict
                         except (TypeError, ValueError):
                             pass
                 if amt > 0:
-                    items.append({"coin": coin, "amount": round(amt, 4)})
+                    item: dict = {"coin": coin, "amount": round(amt, 4)}
+                    # Per-item 24h interest (may be coin-specific, e.g. USDC)
+                    for f in ("24hEarning", "dailyEarning", "earningAmount",
+                              "yesterdayEarning", "lastDayEarning"):
+                        v = it.get(f)
+                        if v not in (None, "", "0", 0):
+                            try:
+                                item["interest_24h"] = round(float(v), 6); break
+                            except (TypeError, ValueError):
+                                pass
+                    items.append(item)
             total = sum(p["amount"] for p in items)
 
         # ── Interest from savings/account ─────────────────────────────────────
@@ -309,13 +319,19 @@ async def fetch_earn_balance(api_key: str, secret: str, passphrase: str) -> dict
         code_b = str(bb.get("code", ""))
         data_b = bb.get("data") or {}
         if code_b in ("00000", "0", "200") and isinstance(data_b, dict):
-            for f in ("usdt24hEarning", "24hEarning", "dailyEarning", "earningAmount"):
+            for f in ("usdt24hEarning", "usdc24hEarning", "24hEarning",
+                      "dailyEarning", "earningAmount"):
                 v = data_b.get(f)
                 if v not in (None, ""):
                     try:
                         interest_24h = round(float(v), 6); break
                     except (TypeError, ValueError):
                         pass
+            # If the account endpoint only returns USDT interest, supplement from per-item interest
+            if interest_24h is None:
+                per_item_24h = [it["interest_24h"] for it in items if "interest_24h" in it]
+                if per_item_24h:
+                    interest_24h = round(sum(per_item_24h), 6)
             for f in ("usdtTotalEarning", "totalEarning", "totalInterest",
                       "accruedInterest", "cumulativeEarning"):
                 v = data_b.get(f)
