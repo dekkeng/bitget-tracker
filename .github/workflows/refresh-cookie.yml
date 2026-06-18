@@ -20,13 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      # Pinned to commit SHA (v4.2.2) — prevents silent tag-moves.
-      # Verify at: https://github.com/actions/checkout/tags
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af68 # v4.2.2
+      # SHA pinned to v4.2.2 — prevents silent tag-moves.
+      # Verify at: https://github.com/actions/checkout/releases/tag/v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      # Pinned to commit SHA (v4.3.0).
-      # Verify at: https://github.com/actions/setup-node/tags
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3e7bde3d79 # v4.3.0
+      - uses: actions/setup-node@v4.3.0
         with:
           node-version: 20
 
