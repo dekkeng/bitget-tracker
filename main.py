@@ -358,21 +358,11 @@ def _parse_history_chart(trades: list[dict]) -> list[dict]:
         d = _ms_to_bkk_date(t["close_time_ms"]) if t["close_time_ms"] else None
         if d:
             day_pnl[d] += t["pnl"]
-    if not day_pnl:
-        return []
-    # Fill every calendar day so the chart has no invisible gaps for no-trade days.
-    today_str = datetime.now(BKK).strftime("%Y-%m-%d")
-    earliest = min(day_pnl)
-    current = datetime.strptime(earliest, "%Y-%m-%d").replace(tzinfo=BKK)
-    end = datetime.strptime(today_str, "%Y-%m-%d").replace(tzinfo=BKK)
     cumulative = 0.0
     result = []
-    while current <= end:
-        d = current.strftime("%Y-%m-%d")
-        pnl = day_pnl.get(d, 0.0)
-        cumulative += pnl
-        result.append({"date": d, "pnl": round(pnl, 4), "cumulative_pnl": round(cumulative, 4)})
-        current += timedelta(days=1)
+    for d in sorted(day_pnl):
+        cumulative += day_pnl[d]
+        result.append({"date": d, "pnl": round(day_pnl[d], 4), "cumulative_pnl": round(cumulative, 4)})
     return result
 
 
@@ -442,8 +432,8 @@ def _push_data(kind: str, data, trader: str = None):
             for r in existing_rows:
                 if isinstance(r, dict) and _trade_key(r) not in seen:
                     merged.append(r)
-            # Trim to last 60 days to keep memory bounded
-            cutoff_ms = int((datetime.now(BKK) - timedelta(days=60)).timestamp() * 1000)
+            # Trim to last 365 days to keep memory bounded while preserving full history
+            cutoff_ms = int((datetime.now(BKK) - timedelta(days=365)).timestamp() * 1000)
             def _close_ms(r: dict) -> int:
                 for k in ("closeTime", "closedAt", "closeTs", "ctime"):
                     v = r.get(k)

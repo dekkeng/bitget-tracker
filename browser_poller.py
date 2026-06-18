@@ -367,9 +367,9 @@ async def _poll_cfd_history(page, push_fn: Callable, trader_name: str, pid: str)
     """
     polls = _status.get("polls", 0)
     need_full = (trader_name not in _history_full_done) or (polls % _HISTORY_FULL_EVERY == 0)
-    max_batches = 25 if need_full else 1   # 25 = ~1250 trades / 30 days
+    max_batches = 200 if need_full else 1   # 200 = ~10 000 trades / full history
 
-    cutoff_ms = int((datetime.now(BKK) - timedelta(days=30)).timestamp() * 1000)
+    cutoff_ms = int((datetime.now(BKK) - timedelta(days=365)).timestamp() * 1000)
     all_rows: list = []
     end_time_ms: int | None = None   # None = no filter (get latest batch first)
     API_PAGE_CAP = 50   # API hard cap; pageSize param is ignored above this
