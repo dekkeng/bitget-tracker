@@ -1342,6 +1342,44 @@ async def get_esp32():
     }
 
 
+@app.get("/api/esp32/positions")
+async def get_esp32_positions():
+    """Compact open-position rows for the ESP32 detail page — copy-trading
+    (global) positions plus the elite portfolio's, with a short source tag."""
+    out = []
+    for p in _parse_positions(_mt5["positions_raw"]):
+        out.append({
+            "s": p["symbol"], "d": "S" if p["side"] == "short" else "L",
+            "sz": p["size"], "e": p["entry_price"],
+            "u": round(p["unrealized_pnl"], 2), "src": "copy",
+        })
+    for p in (_elite.get("positions") or []):
+        out.append({
+            "s": p["symbol"], "d": "S" if p["side"] == "short" else "L",
+            "sz": p["size"], "e": p["entry_price"],
+            "u": round(p["unrealized_pnl"], 2), "src": "elite",
+        })
+    return {"positions": out}
+
+
+@app.get("/api/esp32/history")
+async def get_esp32_history(n: int = 30):
+    """Compact recent closed-trade rows for the ESP32 detail page — merged across
+    all traders and the elite portfolio, newest first, capped at n (max 100)."""
+    n = max(1, min(n, 100))
+    trades = list(_mt5["trades"] or []) + list(_elite.get("trades") or [])
+    trades.sort(key=lambda t: t.get("close_time_ms", 0), reverse=True)
+    out = []
+    for t in trades[:n]:
+        out.append({
+            "t": (t.get("time", "") or "")[5:],   # drop the year → "MM-DD HH:MM"
+            "s": t.get("symbol", ""),
+            "d": "S" if t.get("side") == "short" else "L",
+            "p": round(t.get("pnl", 0.0), 2),
+        })
+    return {"trades": out}
+
+
 # ── Trader management endpoints ──────────────────────────────────────────────
 
 @app.get("/api/traders")

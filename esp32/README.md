@@ -13,23 +13,27 @@ ESP32  ──GET /api/esp32──▶  FastAPI backend  ──(already scraped)�
 
 ## What it shows
 
-A **portrait (240×320), single scrolling page** that combines every income source
-in one view — drag up/down with the touch pen to scroll:
+A **portrait (240×320)** UI with a **home summary + tappable menu** that drills
+into detail sub-pages (each has a `‹` Back button). Detail pages load their data
+on demand, so the home payload stays small.
 
-- **Header** — "BITGET", status dot (green = fresh, amber = stale), data time.
-- **Hero** — grand TOTAL BALANCE (everything: copy + elite + earn) and all-time P&L.
-- **Quick stats** — Today P&L, Open P&L, open Positions (green/red).
-- **Income sources** — balance broken down: Copy trading, Elite portfolio, Earn,
-  Invested.
-- **Elite portfolio** — balance, today / open / all-time P&L, AUM, followers, open
-  positions (hidden if you're not an elite trader).
-- **Earn** — earn balance (hidden if zero).
-- **Copy traders** — one card per active trader: name (★ = open position), balance,
-  today's and all-time P&L.
-- **Footer** — WiFi signal, free heap, last fetch status.
+- **Home** — grand TOTAL BALANCE (copy + elite + earn), all-time P&L, quick stats
+  (Today / Open / Positions), then a menu:
+  - **Copy Traders** — per-trader cards: balance, today / open / all-time P&L, open
+    positions (rendered from the home payload, no extra fetch).
+  - **Elite Portfolio** — balance, today / open / all-time, AUM, followers, plus the
+    elite's open positions (fetches `/api/elite`). Shown only if you're an elite.
+  - **Open Positions** — every open trade, copy + elite, with size/entry/PnL
+    (fetches `/api/esp32/positions`).
+  - **Trade History** — recent closed trades, newest first
+    (fetches `/api/esp32/history?n=30`).
+  - **Earn** — earn balance, 24h/total interest, per-coin holdings (fetches
+    `/api/earn`). Shown only if you have earn.
+- Status dot (green = fresh, amber = stale) and free heap show on the home footer.
 
-Display is portrait via `tft.setRotation(0)`. To flip 180°, change it to `2` (and
-set `ts.setRotation(2)` to match).
+The home summary auto-refreshes every 30 s. Tap a menu row to open a page; tap `‹`
+to return. Display is portrait via `tft.setRotation(0)` — change to `2` to flip
+180° (and set `ts.setRotation(2)` to match).
 
 ## Backend endpoint
 
