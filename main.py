@@ -36,6 +36,21 @@ TRADERS_FILE     = Path(os.environ.get("TRADERS_PATH", "traders.json"))
 CREDENTIALS_FILE = Path(os.environ.get("CREDENTIALS_PATH", "credentials.json"))
 HISTORY_FILE     = Path(os.environ.get("HISTORY_PATH", "history.json"))
 
+
+def _safe_write_text(path: Path, text: str) -> bool:
+    """Write text to path, creating parent dirs first. Never raises — logs and
+    returns False on failure so a misconfigured/read-only volume (e.g. a Railway
+    SETTINGS_PATH whose dir isn't mounted) can't turn a save into an HTTP 500.
+    The in-memory value still updates; only persistence is skipped."""
+    try:
+        if path.parent and not path.parent.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return True
+    except OSError as e:
+        logger.warning("Could not write %s: %s", path, e)
+        return False
+
 _BALANCE_PATS = ("balance", "equity", "totalbal", "totalequity",
                  "totalasset", "accountval", "worth", "asset")
 
@@ -78,7 +93,7 @@ def _load_traders_list() -> list[dict]:
 
 
 def _save_traders_list(traders: list[dict]) -> None:
-    TRADERS_FILE.write_text(json.dumps({"traders": traders}))
+    _safe_write_text(TRADERS_FILE, json.dumps({"traders": traders}))
 
 
 # Module-level mutable list — the single source of truth for main.py
@@ -120,7 +135,7 @@ def _load_settings() -> dict:
 
 
 def _save_settings(s: dict) -> None:
-    SETTINGS_FILE.write_text(json.dumps(s))
+    _safe_write_text(SETTINGS_FILE, json.dumps(s))
 
 
 _settings = _load_settings()
@@ -148,7 +163,7 @@ def _save_history(trader: str, rows: list) -> None:
             except (json.JSONDecodeError, OSError):
                 pass
         data[trader] = rows
-        HISTORY_FILE.write_text(json.dumps(data))
+        _safe_write_text(HISTORY_FILE, json.dumps(data))
     except OSError as e:
         logger.warning("Could not save history.json: %s", e)
 
@@ -966,11 +981,11 @@ async def lifespan(app: FastAPI):
     env_cookie = os.environ.get("BITGET_COOKIE", "")
     cookie_path = Path(os.environ.get("COOKIES_PATH", "cookies.json"))
     if env_cookie and not cookie_path.exists():
-        cookie_path.write_text(json.dumps({
+        if _safe_write_text(cookie_path, json.dumps({
             "cookie": env_cookie,
             "updated": "from-env-var",
-        }))
-        logger.info("Restored cookie from BITGET_COOKIE env var (%d chars)", len(env_cookie))
+        })):
+            logger.info("Restored cookie from BITGET_COOKIE env var (%d chars)", len(env_cookie))
 
     from browser_poller import start_poller
     task = asyncio.create_task(start_poller(_push_data))
@@ -1479,12 +1494,13 @@ async def save_credentials(request: Request):
     passphrase = body.get("passphrase", "").strip()
     if not api_key or not secret or not passphrase:
         return {"ok": False, "error": "api_key, secret and passphrase are all required"}
-    CREDENTIALS_FILE.write_text(json.dumps({
+    if not _safe_write_text(CREDENTIALS_FILE, json.dumps({
         "api_key": api_key,
         "secret": secret,
         "passphrase": passphrase,
         "updated": datetime.now(BKK).isoformat(),
-    }))
+    })):
+        return {"ok": False, "error": "could not persist credentials (check storage path)"}
     logger.info("API credentials saved")
     asyncio.create_task(_refresh_investment())
     asyncio.create_task(_refresh_earn())
@@ -1551,10 +1567,11 @@ async def set_poller_cookie(request: Request):
     cookie = body.get("cookie", "").strip()
     if not cookie:
         return {"ok": False, "error": "No cookie provided"}
-    COOKIES_FILE.write_text(json.dumps({
+    if not _safe_write_text(COOKIES_FILE, json.dumps({
         "cookie": cookie,
         "updated": datetime.now(BKK).isoformat(),
-    }))
+    })):
+        return {"ok": False, "error": "could not persist cookie (check storage path)"}
     logger.info("Poller cookie updated (%d chars)", len(cookie))
     from browser_poller import reset_auth_status
     reset_auth_status()
