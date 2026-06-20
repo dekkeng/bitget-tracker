@@ -1164,6 +1164,19 @@ async def get_esp32():
     earn_total  = round((_earn["data"] or {}).get("total", 0.0), 2)
     elite_total = round((_elite["data"] or {}).get("balance", 0.0), 2)
 
+    # Elite (lead) trader portfolio — present when the user is themselves an
+    # elite trader, not just a copy-trading follower. Mirrors /api/elite.
+    elite_d = _elite["data"] or {}
+    elite_settings_pnl = _settings.get("elite_all_time_pnl", 0.0)
+    elite = {
+        "on":   _elite["data"] is not None or abs(elite_settings_pnl) >= 0.01,
+        "bal":  round(elite_d.get("balance", 0.0), 2),
+        "all":  round(elite_d.get("all_time_pnl") or elite_settings_pnl or 0.0, 2),
+        "day":  round(elite_d.get("daily_pnl") or 0.0, 2),
+        "aum":  round(elite_d.get("aum", 0.0), 2),
+        "fans": int(elite_d.get("follower_count", 0)),
+    }
+
     if not s:
         return {
             "ok": False,
@@ -1172,7 +1185,7 @@ async def get_esp32():
             "bal": round(_settings.get("balance", 0.0) + earn_total + elite_total, 2),
             "inv": round(_settings.get("investment", 0.0), 2),
             "day": 0.0, "open": 0.0, "npos": 0, "all": 0.0, "earn": earn_total,
-            "traders": [],
+            "traders": [], "elite": elite,
         }
 
     pushed_at = s.get("pushed_at")
@@ -1219,6 +1232,7 @@ async def get_esp32():
         "all":  round(s["all_time_pnl"], 2),
         "earn": earn_total,
         "traders": traders,
+        "elite": elite,
     }
 
 

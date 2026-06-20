@@ -83,6 +83,8 @@ static lv_obj_t *lbl_updated;
 static lv_obj_t *led_status;           // small status dot (green/amber/red)
 static lv_obj_t *val_today, *val_open, *val_alltime, *val_inv, *val_pos, *val_earn;
 static lv_obj_t *traders_list;
+static lv_obj_t *lbl_e_balance, *lbl_e_note;
+static lv_obj_t *val_e_aum, *val_e_fans, *val_e_today, *val_e_all;
 static lv_obj_t *lbl_net_ssid, *lbl_net_ip, *lbl_net_rssi, *lbl_net_upd, *lbl_net_heap, *lbl_net_state;
 
 static uint32_t last_fetch = 0;
@@ -285,6 +287,66 @@ static void build_status(lv_obj_t *tab) {
   make_net_row(tab, "Last fetch",  &lbl_net_state);
 }
 
+static void build_elite(lv_obj_t *tab) {
+  lv_obj_set_style_pad_all(tab, 6, 0);
+  lv_obj_set_flex_flow(tab, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(tab, 6, 0);
+
+  /* Header: elite balance + note */
+  lv_obj_t *header = lv_obj_create(tab);
+  lv_obj_set_size(header, LV_PCT(100), 64);
+  lv_obj_set_style_bg_color(header, COL_CARD, 0);
+  lv_obj_set_style_border_width(header, 0, 0);
+  lv_obj_set_style_radius(header, 8, 0);
+  lv_obj_set_style_pad_all(header, 8, 0);
+  lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *cap = lv_label_create(header);
+  lv_label_set_text(cap, "ELITE BALANCE");
+  lv_obj_set_style_text_color(cap, COL_MUTED, 0);
+  lv_obj_set_style_text_font(cap, &lv_font_montserrat_12, 0);
+  lv_obj_align(cap, LV_ALIGN_TOP_LEFT, 0, 0);
+
+  lbl_e_balance = lv_label_create(header);
+  lv_label_set_text(lbl_e_balance, "$--");
+  lv_obj_set_style_text_color(lbl_e_balance, COL_TEXT, 0);
+  lv_obj_set_style_text_font(lbl_e_balance, &lv_font_montserrat_28, 0);
+  lv_obj_align(lbl_e_balance, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+
+  lbl_e_note = lv_label_create(header);
+  lv_label_set_text(lbl_e_note, "");
+  lv_obj_set_style_text_color(lbl_e_note, COL_AMBER, 0);
+  lv_obj_set_style_text_font(lbl_e_note, &lv_font_montserrat_12, 0);
+  lv_obj_align(lbl_e_note, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+
+  /* 2x2 grid: AUM, FOLLOWERS, TODAY, ALL-TIME */
+  static lv_coord_t col_dsc[] = {LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
+  static lv_coord_t row_dsc[] = {LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
+
+  lv_obj_t *grid = lv_obj_create(tab);
+  lv_obj_set_size(grid, LV_PCT(100), LV_PCT(100));
+  lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(grid, 0, 0);
+  lv_obj_set_style_pad_all(grid, 0, 0);
+  lv_obj_set_flex_grow(grid, 1);
+  lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_grid_dsc_array(grid, col_dsc, row_dsc);
+  lv_obj_set_style_pad_column(grid, 6, 0);
+  lv_obj_set_style_pad_row(grid, 6, 0);
+
+  struct { const char *title; lv_obj_t **val; } cells[] = {
+    {"AUM",       &val_e_aum},
+    {"FOLLOWERS", &val_e_fans},
+    {"TODAY",     &val_e_today},
+    {"ALL-TIME",  &val_e_all},
+  };
+  for (int i = 0; i < 4; i++) {
+    lv_obj_t *card = make_stat_card(grid, cells[i].title, cells[i].val);
+    lv_obj_set_grid_cell(card, LV_GRID_ALIGN_STRETCH, i % 2, 1,
+                               LV_GRID_ALIGN_STRETCH, i / 2, 1);
+  }
+}
+
 static void build_ui() {
   lv_obj_t *scr = lv_scr_act();
   lv_obj_set_style_bg_color(scr, COL_BG, 0);
@@ -301,14 +363,17 @@ static void build_ui() {
 
   lv_obj_t *t1 = lv_tabview_add_tab(tv, "OVERVIEW");
   lv_obj_t *t2 = lv_tabview_add_tab(tv, "TRADERS");
-  lv_obj_t *t3 = lv_tabview_add_tab(tv, "STATUS");
+  lv_obj_t *t3 = lv_tabview_add_tab(tv, "ELITE");
+  lv_obj_t *t4 = lv_tabview_add_tab(tv, "STATUS");
   lv_obj_set_style_bg_color(t1, COL_BG, 0);
   lv_obj_set_style_bg_color(t2, COL_BG, 0);
   lv_obj_set_style_bg_color(t3, COL_BG, 0);
+  lv_obj_set_style_bg_color(t4, COL_BG, 0);
 
   build_overview(t1);
   build_traders(t2);
-  build_status(t3);
+  build_elite(t3);
+  build_status(t4);
 }
 
 /* ── Apply fetched data to the UI ────────────────────────────────────────── */
@@ -406,6 +471,30 @@ static void apply_data(JsonDocument &doc) {
   lv_label_set_text(val_pos, buf);
 
   update_traders(doc["traders"].as<JsonArray>());
+
+  // Elite (lead) trader portfolio
+  JsonObject el = doc["elite"].as<JsonObject>();
+  bool eon = el["on"] | false;
+  if (eon) {
+    lv_label_set_text(lbl_e_note, "");
+    fmtUSD(buf, sizeof(buf), el["bal"] | 0.0);
+    lv_label_set_text(lbl_e_balance, buf);
+    fmtUSD(buf, sizeof(buf), el["aum"] | 0.0);
+    lv_label_set_text(val_e_aum, buf);
+    snprintf(buf, sizeof(buf), "%d", (int)(el["fans"] | 0));
+    lv_label_set_text(val_e_fans, buf);
+    set_pnl_label(val_e_today, el["day"] | 0.0);
+    set_pnl_label(val_e_all, el["all"] | 0.0);
+  } else {
+    lv_label_set_text(lbl_e_balance, "$0.00");
+    lv_label_set_text(lbl_e_note, "not an elite trader");
+    lv_label_set_text(val_e_aum, "--");
+    lv_label_set_text(val_e_fans, "--");
+    lv_label_set_text(val_e_today, "--");
+    lv_obj_set_style_text_color(val_e_today, COL_MUTED, 0);
+    lv_label_set_text(val_e_all, "--");
+    lv_obj_set_style_text_color(val_e_all, COL_MUTED, 0);
+  }
 
   // Status tab data-time
   char dt[40];
