@@ -263,55 +263,69 @@ async def fetch_earn_balance(api_key: str, secret: str, passphrase: str) -> dict
     path_assets = "/api/v2/earn/savings/assets"
     path_acct   = "/api/v2/earn/savings/account"
 
+    async def _signed_get(client: httpx.AsyncClient, path: str, params: dict | None = None):
+        """Signed GET. The query string must be part of the signature and sorted
+        exactly as it is sent, matching _get_all_pages."""
+        qs = ""
+        if params:
+            qs = "?" + "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+        hdrs = _auth_headers("GET", path + qs, "", api_key, secret, passphrase)
+        r = await client.get(BITGET_API_BASE + path + qs, headers=hdrs)
+        return r.json()
+
     async with httpx.AsyncClient(timeout=30) as client:
-        hdrs_a = _auth_headers("GET", path_assets, "", api_key, secret, passphrase)
-        hdrs_b = _auth_headers("GET", path_acct,   "", api_key, secret, passphrase)
         try:
-            ra, rb = await asyncio.gather(
-                client.get(BITGET_API_BASE + path_assets, headers=hdrs_a),
-                client.get(BITGET_API_BASE + path_acct,   headers=hdrs_b),
+            # periodType is REQUIRED on savings/assets — query both flexible and
+            # fixed and merge, or holdings (USDT, USDGO, …) come back empty.
+            ba_flex, ba_fixed, bb = await asyncio.gather(
+                _signed_get(client, path_assets, {"periodType": "flexible", "limit": "100"}),
+                _signed_get(client, path_assets, {"periodType": "fixed", "limit": "100"}),
+                _signed_get(client, path_acct),
             )
-            ba, bb = ra.json(), rb.json()
         except Exception as exc:
             logger.warning("Earn API fetch error: %s", exc)
             return {"total": 0.0, "items": [], "apr": None,
                     "interest_24h": None, "total_interest": None,
                     "source": None, "error": str(exc)}
 
-        # ── Balance from savings/assets ───────────────────────────────────────
+        # ── Balance from savings/assets (flexible + fixed) ────────────────────
         total = 0.0
         items: list[dict] = []
-        code_a = str(ba.get("code", ""))
-        data_a = ba.get("data") or {}
-        if code_a in ("00000", "0", "200") and isinstance(data_a, dict):
-            rows = (data_a.get("resultList") or data_a.get("list") or
-                    data_a.get("assets") or data_a.get("rows") or [])
-            for it in rows:
-                if not isinstance(it, dict):
-                    continue
-                coin = str(it.get("productCoin") or it.get("coinName") or it.get("coin") or "")
-                amt = 0.0
-                for f in ("holdAmount", "amount", "totalAmount", "principal",
-                          "holdingAmount", "currentAmount", "holdSize"):
+        asset_codes: dict[str, str] = {}
+        rows: list = []
+        for label, resp in (("flexible", ba_flex), ("fixed", ba_fixed)):
+            code = str(resp.get("code", ""))
+            asset_codes[label] = code
+            d = resp.get("data") or {}
+            if code in ("00000", "0", "200") and isinstance(d, dict):
+                rows.extend(d.get("resultList") or d.get("list") or
+                            d.get("assets") or d.get("rows") or [])
+        for it in rows:
+            if not isinstance(it, dict):
+                continue
+            coin = str(it.get("productCoin") or it.get("coinName") or it.get("coin") or "")
+            amt = 0.0
+            for f in ("holdAmount", "amount", "totalAmount", "principal",
+                      "holdingAmount", "currentAmount", "holdSize"):
+                v = it.get(f)
+                if v not in (None, "", "0", 0):
+                    try:
+                        amt = float(v); break
+                    except (TypeError, ValueError):
+                        pass
+            if amt > 0:
+                item: dict = {"coin": coin, "amount": round(amt, 4)}
+                # Per-item 24h interest (may be coin-specific, e.g. USDC)
+                for f in ("24hEarning", "dailyEarning", "earningAmount",
+                          "yesterdayEarning", "lastDayEarning"):
                     v = it.get(f)
                     if v not in (None, "", "0", 0):
                         try:
-                            amt = float(v); break
+                            item["interest_24h"] = round(float(v), 6); break
                         except (TypeError, ValueError):
                             pass
-                if amt > 0:
-                    item: dict = {"coin": coin, "amount": round(amt, 4)}
-                    # Per-item 24h interest (may be coin-specific, e.g. USDC)
-                    for f in ("24hEarning", "dailyEarning", "earningAmount",
-                              "yesterdayEarning", "lastDayEarning"):
-                        v = it.get(f)
-                        if v not in (None, "", "0", 0):
-                            try:
-                                item["interest_24h"] = round(float(v), 6); break
-                            except (TypeError, ValueError):
-                                pass
-                    items.append(item)
-            total = sum(p["amount"] for p in items)
+                items.append(item)
+        total = sum(p["amount"] for p in items)
 
         # ── Interest from savings/account ─────────────────────────────────────
         interest_24h: float | None = None
@@ -352,8 +366,9 @@ async def fetch_earn_balance(api_key: str, secret: str, passphrase: str) -> dict
                         except (TypeError, ValueError):
                             pass
 
-        logger.info("Earn: total=%.2f interest_24h=%s total_interest=%s",
-                    total, interest_24h, total_interest)
+        logger.info("Earn: total=%.2f interest_24h=%s total_interest=%s codes=%s",
+                    total, interest_24h, total_interest, asset_codes)
+        ok = total > 0 or interest_24h is not None
         return {
             "total": round(total, 2),
             "items": items,
@@ -361,5 +376,7 @@ async def fetch_earn_balance(api_key: str, secret: str, passphrase: str) -> dict
             "interest_24h": interest_24h,
             "total_interest": total_interest,
             "source": path_assets if items else path_acct,
-            "error": None if (total > 0 or interest_24h is not None) else "no balance found",
+            # Surface per-periodType API codes so /api/earn reveals the cause
+            # (e.g. an auth/permission error) when nothing comes back.
+            "error": None if ok else f"no balance found (assets codes={asset_codes})",
         }
