@@ -430,10 +430,11 @@ async def _poll_cfd_history(page, push_fn: Callable, trader_name: str, pid: str)
 
             if oldest and oldest < cutoff_ms:
                 break
-            if len(rows) < API_PAGE_CAP:
-                break
             if not oldest:
                 break
+            # Note: do NOT break on len(rows) < API_PAGE_CAP.
+            # The API sometimes returns a short batch at a time-window boundary
+            # even when older trades exist — stopping early would miss history.
             end_time_ms = oldest - 1
 
         if all_rows:
