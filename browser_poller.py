@@ -935,11 +935,20 @@ async def _fetch_elite_trader(page, push_fn: Callable):
                     if (text.trimStart().startsWith('<')) return {status: r.status, error: 'html_redirect'};
                     const j = JSON.parse(text);
                     const d = j?.data;
-                    const row = Array.isArray(d)
+                    let row = Array.isArray(d)
                         ? d[0]
                         : (d?.portfolioDetails?.[0] ?? d?.list?.[0] ?? d?.rows?.[0] ?? d);
+                    // The overview endpoint nests the real metrics inside
+                    // public/privatePortfolioOverview — flatten them up so the
+                    // fields (balance, aum, profit share, copiers, roi) are reachable.
+                    if (row && typeof row === 'object' &&
+                        (row.publicPortfolioOverview || row.privatePortfolioOverview)) {
+                        row = Object.assign({}, row,
+                                            row.publicPortfolioOverview || {},
+                                            row.privatePortfolioOverview || {});
+                    }
                     return {status: r.status, code: j?.code, msg: j?.msg,
-                            keys: row && typeof row === 'object' ? Object.keys(row).slice(0, 25) : null,
+                            keys: row && typeof row === 'object' ? Object.keys(row).slice(0, 40) : null,
                             row: row};
                 } catch(e) { return {status: 0, error: String(e)}; }
             }""", [method, ep])
