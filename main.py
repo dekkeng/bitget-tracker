@@ -1150,6 +1150,78 @@ async def get_widget():
     }
 
 
+@app.get("/api/esp32")
+async def get_esp32():
+    """Compact, flat JSON tailored for an ESP32 / embedded LVGL dashboard.
+
+    One small payload with everything the device needs to render a full
+    dashboard, so the microcontroller does a single GET and minimal JSON
+    parsing. Short keys keep the document small enough for ArduinoJson on
+    a 520KB-SRAM ESP32. The device never talks to Bitget directly — it only
+    reads this server's already-scraped data.
+    """
+    s = _mt5["summary"]
+    earn_total  = round((_earn["data"] or {}).get("total", 0.0), 2)
+    elite_total = round((_elite["data"] or {}).get("balance", 0.0), 2)
+
+    if not s:
+        return {
+            "ok": False,
+            "stale": True,
+            "upd": datetime.now(BKK).strftime("%H:%M"),
+            "bal": round(_settings.get("balance", 0.0) + earn_total + elite_total, 2),
+            "inv": round(_settings.get("investment", 0.0), 2),
+            "day": 0.0, "open": 0.0, "npos": 0, "all": 0.0, "earn": earn_total,
+            "traders": [],
+        }
+
+    pushed_at = s.get("pushed_at")
+    stale = True
+    if pushed_at:
+        try:
+            last = datetime.strptime(
+                datetime.now(BKK).strftime("%Y-%m-%d ") + pushed_at, "%Y-%m-%d %H:%M"
+            ).replace(tzinfo=BKK)
+            stale = (datetime.now(BKK) - last).total_seconds() > 900
+        except Exception:
+            stale = False
+
+    # Compact per-trader rows (skip stopped copies, already counted globally)
+    cancelled_names = set(_settings.get("cancelled_trader_names") or [])
+    traders = []
+    for name in _trader_names():
+        if name in cancelled_names:
+            continue
+        tc = _tc(name)
+        if tc["summary"] is None:
+            _rebuild_trader_summary(name)
+        ts = tc["summary"] or {}
+        if not ts.get("has_data"):
+            continue
+        traders.append({
+            "n":    (ts.get("name") or name)[:16],
+            "bal":  round(ts.get("balance", 0.0), 2),
+            "day":  round(ts.get("daily_pnl", 0.0), 2),
+            "all":  round(ts.get("all_time_pnl", 0.0), 2),
+            "open": round(ts.get("open_positions_pnl", 0.0), 2),
+            "pos":  int(ts.get("open_position_count", 0)),
+        })
+
+    return {
+        "ok": True,
+        "stale": stale,
+        "upd": pushed_at or datetime.now(BKK).strftime("%H:%M"),
+        "bal":  round(s["total_balance"] + earn_total + elite_total, 2),
+        "inv":  round(s["total_investment"], 2),
+        "day":  round(s["daily_pnl"], 2),
+        "open": round(s["open_positions_pnl"], 2),
+        "npos": int(s["open_positions"]),
+        "all":  round(s["all_time_pnl"], 2),
+        "earn": earn_total,
+        "traders": traders,
+    }
+
+
 # ── Trader management endpoints ──────────────────────────────────────────────
 
 @app.get("/api/traders")
