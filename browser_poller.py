@@ -527,6 +527,7 @@ async def _fetch_balance(page, push_fn: Callable,
         await _fetch_futures_balance(page, push_fn, trader_name, pid)
 
     await _fetch_elite_trader(page, push_fn)
+    await _fetch_elite_trades(page, push_fn)
 
 
 async def _fetch_cfd_balances(page, push_fn: Callable, cfd_traders: dict):
@@ -971,12 +972,14 @@ async def _fetch_elite_trader(page, push_fn: Callable):
             if (_ELITE_KEYS & row_keys) and not (_ACTIVE_KEYS & row_keys):
                 _elite_ep     = ep
                 _elite_method = method
+                _capture_elite_pid(row)
                 _status["elite_probe"] = {"found": True, "method": method, "ep": ep,
                                           "http": http, "code": code,
+                                          "pid": _elite_pid,
                                           "keys": list(row_keys)[:25], "hits": hits}
                 push_fn("elite_trader", row)
-                logger.info("Elite trader FOUND: %s %s balance=%s equity=%s",
-                            method, ep, row.get("balance"), row.get("equity"))
+                logger.info("Elite trader FOUND: %s %s pid=%s balance=%s equity=%s",
+                            method, ep, _elite_pid, row.get("balance"), row.get("equity"))
                 return
             elif row_keys:
                 logger.info("Elite probe 200 wrong shape: %s %s keys=%s",
@@ -988,4 +991,168 @@ async def _fetch_elite_trader(page, push_fn: Callable):
         _elite_ep = None
         _elite_probe_count = 0
     _status["elite_probe"] = {"found": False, "hits": hits}
+
+
+# ── Elite positions + closed-trade history (track like a trader) ──────────────
+
+_elite_pid: str | None = None
+_elite_hist_full_done = False
+
+# Open-position endpoints to try for the elite portfolio. tracePosition is the
+# confirmed-working MT5 positions endpoint; the rest are fallbacks. (method, ep)
+_ELITE_POS_PROBES: list[tuple[str, str]] = [
+    ("POST", "/v1/trace/mt5/data/tracePosition"),
+    ("POST", "/v1/trace/mt5/trace/getTraderOpenPosition"),
+    ("POST", "/v1/trace/mt5/trader/openPosition"),
+    ("POST", "/v1/trace/mt5/elite/openPosition"),
+]
+_elite_pos_ep: str | None = None
+
+# Closed-history endpoints. positionHistory is the confirmed MT5 history endpoint.
+_ELITE_HIST_PROBES: list[str] = [
+    "/v1/trace/mt5/trace/positionHistory",
+    "/v1/trace/mt5/trader/positionHistory",
+    "/v1/trace/mt5/elite/positionHistory",
+]
+_elite_hist_ep: str | None = None
+
+
+def _capture_elite_pid(row: dict) -> None:
+    """Pull the elite portfolio's own id out of the discovered summary row."""
+    global _elite_pid
+    pid = str(row.get("portfolioId") or row.get("traderPortfolioId") or
+              row.get("traderId") or row.get("followPortfolioId") or
+              row.get("id") or "")
+    if pid:
+        _elite_pid = pid
+
+
+async def _fetch_elite_positions(page, push_fn: Callable, pid: str):
+    """Scrape the elite portfolio's OPEN positions and push them as elite_positions."""
+    global _elite_pos_ep
+    probes = [_elite_pos_ep] if _elite_pos_ep else [ep for _, ep in _ELITE_POS_PROBES]
+    diag = []
+    for ep in probes:
+        try:
+            result = await page.evaluate("""async ([ep, pid]) => {
+                try {
+                    const r = await fetch(ep, {
+                        method: 'POST', credentials: 'include',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({portfolioId: pid}),
+                    });
+                    const text = await r.text();
+                    if (text.trimStart().startsWith('<')) return {status: r.status, error: 'html_redirect'};
+                    const j = JSON.parse(text);
+                    const d = j?.data;
+                    const rows = Array.isArray(d) ? d : (d?.list || d?.rows || d?.positions || []);
+                    return {status: r.status, code: j?.code, msg: j?.msg,
+                            data: j?.data, rows: rows.length};
+                } catch(e) { return {status: 0, error: String(e)}; }
+            }""", [ep, pid])
+        except Exception as e:
+            diag.append({"ep": ep, "error": str(e)})
+            continue
+
+        http = result.get("status") if isinstance(result, dict) else 0
+        code = result.get("code")   if isinstance(result, dict) else None
+        diag.append({"ep": ep, "http": http, "code": code,
+                     "rows": result.get("rows"), "error": result.get("error")})
+        if result.get("error") == "html_redirect":
+            _status["auth_ok"] = False
+            break
+        if http == 200 and code in ("00000", "200", "0"):
+            _elite_pos_ep = ep
+            push_fn("elite_positions", result.get("data") or {})
+            logger.info("Elite positions ep=%s rows=%s", ep, result.get("rows"))
+            break
+    _status["elite_positions_probe"] = diag
+
+
+async def _fetch_elite_history(page, push_fn: Callable, pid: str):
+    """Scrape the elite portfolio's CLOSED trade history and push as elite_history.
+
+    Page-1 each cycle; a full backfill (walk back to 365d) runs once per process
+    and then periodically, mirroring the trader history poller.
+    """
+    global _elite_hist_ep, _elite_hist_full_done
+    probes = [_elite_hist_ep] if _elite_hist_ep else list(_ELITE_HIST_PROBES)
+    polls = _status.get("polls", 0)
+    need_full = (not _elite_hist_full_done) or (polls % _HISTORY_FULL_EVERY == 0)
+    cutoff_ms = int((datetime.now(BKK) - timedelta(days=365)).timestamp() * 1000)
+    diag = []
+
+    for ep in probes:
+        all_rows: list = []
+        end_time_ms: int | None = None
+        prev_oldest: int | None = None
+        max_batches = 200 if need_full else 1
+        ep_ok = False
+        try:
+            for batch in range(max_batches):
+                body = {
+                    "portfolioId": pid,
+                    "pageSize": 50,
+                    "startTime": cutoff_ms,
+                    "endTime": end_time_ms if end_time_ms is not None
+                               else int(datetime.now(BKK).timestamp() * 1000),
+                }
+                hist = await page.evaluate("""async ([ep, body]) => {
+                    try {
+                        const r = await fetch(ep, {
+                            method: 'POST', credentials: 'include',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(body),
+                        });
+                        const text = await r.text();
+                        if (text.trimStart().startsWith('<')) return {status: r.status, error: 'html_redirect'};
+                        const j = JSON.parse(text);
+                        return {status: r.status, data: j};
+                    } catch(e) { return {status: 0, error: String(e)}; }
+                }""", [ep, body])
+
+                api_code = (hist.get("data") or {}).get("code")
+                if batch == 0:
+                    diag.append({"ep": ep, "http": hist.get("status"),
+                                 "code": api_code, "error": hist.get("error")})
+                if hist.get("error") == "html_redirect" or api_code == "00004":
+                    _status["auth_ok"] = False
+                    break
+                if hist.get("status") != 200 or api_code not in ("00000", "200", "0"):
+                    break
+                rows = _extract_rows(hist.get("data") or {})
+                if not rows:
+                    ep_ok = True  # endpoint works, just no (more) rows
+                    break
+                ep_ok = True
+                all_rows.extend(rows)
+                oldest = _oldest_close_ms(rows)
+                if oldest is None or oldest == prev_oldest:
+                    break
+                prev_oldest = oldest
+                if oldest < cutoff_ms:
+                    break
+                end_time_ms = oldest - 1
+        except Exception as e:
+            diag.append({"ep": ep, "error": str(e)})
+            continue
+
+        if ep_ok:
+            _elite_hist_ep = ep
+            if all_rows:
+                push_fn("elite_history", {"code": "200", "data": {"rows": all_rows}})
+                logger.info("Elite history ep=%s: %d trades (%s)", ep, len(all_rows),
+                            "full" if need_full else "page1")
+            if need_full:
+                _elite_hist_full_done = True
+            break
+    _status["elite_history_probe"] = diag
+
+
+async def _fetch_elite_trades(page, push_fn: Callable):
+    """Scrape elite open positions + closed history once the elite pid is known."""
+    if not _elite_pid:
+        return
+    await _fetch_elite_positions(page, push_fn, _elite_pid)
+    await _fetch_elite_history(page, push_fn, _elite_pid)
 

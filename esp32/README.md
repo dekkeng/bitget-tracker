@@ -18,8 +18,9 @@ ESP32  ──GET /api/esp32──▶  FastAPI backend  ──(already scraped)�
   open Positions count, Earn balance. P&L values are green/red.
 - **TRADERS tab** — one card per active trader: name (★ = has open position),
   balance, today's P&L, all-time P&L.
-- **ELITE tab** — your own elite (lead) trader portfolio: balance, AUM, follower
-  count, today's and all-time P&L. Shows "not an elite trader" if you only copy.
+- **ELITE tab** — your own elite (lead) trader portfolio tracked like a trader:
+  balance, today's / open / all-time P&L, AUM, follower count, open positions.
+  Shows "not an elite trader" if you only copy.
 - **STATUS tab** — WiFi SSID/IP/signal, data time, free heap, last fetch result.
 
 Tap the tabs (or swipe) to switch screens.
@@ -37,7 +38,7 @@ This sketch consumes `GET {SERVER_URL}/api/esp32`, a compact flat JSON added to
   "traders": [
     {"n":"DKTrading","bal":1184.56,"day":12.34,"all":234.56,"open":-5.67,"pos":1}
   ],
-  "elite": {"on":true,"bal":5000.0,"all":820.5,"day":33.2,"aum":125000.0,"fans":87}
+  "elite": {"on":true,"bal":5000.0,"all":820.5,"day":33.2,"open":40.0,"pos":1,"aum":125000.0,"fans":87}
 }
 ```
 

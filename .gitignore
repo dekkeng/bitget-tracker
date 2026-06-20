@@ -4,7 +4,11 @@ __pycache__/
 .venv/
 settings.json
 cookies.json
+history.json
+traders.json
+credentials.json
 headless/browser-data/
 headless/node_modules/
 headless/.env
 headless/data/
+esp32/wokwi/.cache/

@@ -84,7 +84,7 @@ static lv_obj_t *led_status;           // small status dot (green/amber/red)
 static lv_obj_t *val_today, *val_open, *val_alltime, *val_inv, *val_pos, *val_earn;
 static lv_obj_t *traders_list;
 static lv_obj_t *lbl_e_balance, *lbl_e_note;
-static lv_obj_t *val_e_aum, *val_e_fans, *val_e_today, *val_e_all;
+static lv_obj_t *val_e_aum, *val_e_fans, *val_e_today, *val_e_all, *val_e_open, *val_e_pos;
 static lv_obj_t *lbl_net_ssid, *lbl_net_ip, *lbl_net_rssi, *lbl_net_upd, *lbl_net_heap, *lbl_net_state;
 
 static uint32_t last_fetch = 0;
@@ -319,8 +319,8 @@ static void build_elite(lv_obj_t *tab) {
   lv_obj_set_style_text_font(lbl_e_note, &lv_font_montserrat_12, 0);
   lv_obj_align(lbl_e_note, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
 
-  /* 2x2 grid: AUM, FOLLOWERS, TODAY, ALL-TIME */
-  static lv_coord_t col_dsc[] = {LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
+  /* 2x3 grid: TODAY, OPEN P&L, ALL-TIME / AUM, FOLLOWERS, POS */
+  static lv_coord_t col_dsc[] = {LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
   static lv_coord_t row_dsc[] = {LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
 
   lv_obj_t *grid = lv_obj_create(tab);
@@ -335,15 +335,17 @@ static void build_elite(lv_obj_t *tab) {
   lv_obj_set_style_pad_row(grid, 6, 0);
 
   struct { const char *title; lv_obj_t **val; } cells[] = {
+    {"TODAY",     &val_e_today},
+    {"OPEN P&L",  &val_e_open},
+    {"ALL-TIME",  &val_e_all},
     {"AUM",       &val_e_aum},
     {"FOLLOWERS", &val_e_fans},
-    {"TODAY",     &val_e_today},
-    {"ALL-TIME",  &val_e_all},
+    {"POS",       &val_e_pos},
   };
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 6; i++) {
     lv_obj_t *card = make_stat_card(grid, cells[i].title, cells[i].val);
-    lv_obj_set_grid_cell(card, LV_GRID_ALIGN_STRETCH, i % 2, 1,
-                               LV_GRID_ALIGN_STRETCH, i / 2, 1);
+    lv_obj_set_grid_cell(card, LV_GRID_ALIGN_STRETCH, i % 3, 1,
+                               LV_GRID_ALIGN_STRETCH, i / 3, 1);
   }
 }
 
@@ -483,15 +485,21 @@ static void apply_data(JsonDocument &doc) {
     lv_label_set_text(val_e_aum, buf);
     snprintf(buf, sizeof(buf), "%d", (int)(el["fans"] | 0));
     lv_label_set_text(val_e_fans, buf);
+    snprintf(buf, sizeof(buf), "%d", (int)(el["pos"] | 0));
+    lv_label_set_text(val_e_pos, buf);
     set_pnl_label(val_e_today, el["day"] | 0.0);
+    set_pnl_label(val_e_open, el["open"] | 0.0);
     set_pnl_label(val_e_all, el["all"] | 0.0);
   } else {
     lv_label_set_text(lbl_e_balance, "$0.00");
     lv_label_set_text(lbl_e_note, "not an elite trader");
     lv_label_set_text(val_e_aum, "--");
     lv_label_set_text(val_e_fans, "--");
+    lv_label_set_text(val_e_pos, "--");
     lv_label_set_text(val_e_today, "--");
     lv_obj_set_style_text_color(val_e_today, COL_MUTED, 0);
+    lv_label_set_text(val_e_open, "--");
+    lv_obj_set_style_text_color(val_e_open, COL_MUTED, 0);
     lv_label_set_text(val_e_all, "--");
     lv_obj_set_style_text_color(val_e_all, COL_MUTED, 0);
   }

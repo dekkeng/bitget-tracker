@@ -204,10 +204,24 @@ _earn: dict = {
 }
 
 _elite: dict = {
-    "data": None,        # dict with balance, all_time_pnl, daily_pnl, follower_count
+    "data": None,        # dict with balance, all_time_pnl, daily_pnl, follower_count,
+                         #   open_pnl, open_position_count (latter two from positions)
     "fetched_at": None,
     "error": None,
+    "positions_raw": None,   # raw open-positions payload for the elite portfolio
+    "history_raw": None,     # merged closed-trade rows for the elite portfolio
+    "trades": None,          # parsed closed trades
+    "positions": None,       # parsed open positions
 }
+
+# Elite closed-trade history is persisted in history.json under this reserved
+# key (not a real trader name) so it survives redeploys like trader history.
+_ELITE_HISTORY_KEY = "__elite__"
+
+_elite_persisted = _load_history().get(_ELITE_HISTORY_KEY, [])
+if _elite_persisted:
+    _elite["history_raw"] = {"code": "200", "data": {"rows": _elite_persisted}}
+    logger.info("Seeded elite history from disk: %d rows", len(_elite_persisted))
 
 
 # ── Time helpers ──────────────────────────────────────────────────────────────
@@ -399,6 +413,64 @@ def _load_credentials() -> dict | None:
     return None
 
 
+# ── History merge + elite rebuild ─────────────────────────────────────────────
+
+def _trade_dedup_key(r: dict) -> str:
+    ct = (r.get("closeTime") or r.get("closedAt") or
+          r.get("closeTs") or r.get("ctime") or "")
+    return f"{ct}_{r.get('symbol', '')}"
+
+
+def _merge_history_rows(existing_rows: list, new_rows: list) -> list:
+    """Merge new closed-trade rows with existing ones, dedup by close-time+symbol,
+    and trim to the last 365 days. Shared by trader and elite history paths."""
+    seen = {_trade_dedup_key(r) for r in new_rows if isinstance(r, dict)}
+    merged = list(new_rows)
+    for r in existing_rows:
+        if isinstance(r, dict) and _trade_dedup_key(r) not in seen:
+            merged.append(r)
+    cutoff_ms = int((datetime.now(BKK) - timedelta(days=365)).timestamp() * 1000)
+
+    def _close_ms(r: dict) -> int:
+        for k in ("closeTime", "closedAt", "closeTs", "ctime"):
+            v = r.get(k)
+            if v:
+                try:
+                    t = int(v)
+                    return t * 1000 if t < 10_000_000_000 else t
+                except (TypeError, ValueError):
+                    pass
+        return cutoff_ms + 1  # keep if unknown
+    return [r for r in merged if _close_ms(r) > cutoff_ms]
+
+
+def _rebuild_elite() -> None:
+    """Recompute the elite portfolio's derived fields (open PnL, position count,
+    daily PnL) from its scraped positions and closed-trade history. The scraped
+    summary (balance, AUM, followers, all-time PnL) is preserved; only the
+    position/trade-derived fields are (re)computed here."""
+    d = dict(_elite["data"] or {})
+    trades = _parse_trades(_elite.get("history_raw"))
+    positions = _parse_positions(_elite.get("positions_raw"))
+
+    today_start_ms, today_end_ms = _bkk_today_range_ms()
+    daily = sum(t["pnl"] for t in trades
+                if today_start_ms <= t["close_time_ms"] < today_end_ms)
+    open_pnl = sum(p["unrealized_pnl"] for p in positions)
+
+    # Daily: prefer trade-derived when we have history; else keep scraped value.
+    if trades:
+        d["daily_pnl"] = round(daily, 4)
+    d["open_pnl"] = round(open_pnl, 4)
+    d["open_position_count"] = len(positions)
+    # all_time_pnl: keep the scraped totalProfit (history window may be partial)
+
+    _elite["trades"] = trades
+    _elite["positions"] = positions
+    if d:
+        _elite["data"] = d
+
+
 # ── Push handler ──────────────────────────────────────────────────────────────
 
 def _push_data(kind: str, data, trader: str = None):
@@ -422,29 +494,7 @@ def _push_data(kind: str, data, trader: str = None):
         new_rows = _extract_history_rows(data)
         if new_rows:
             existing_rows = _extract_history_rows(tc.get("history_raw"))
-            # Deduplicate by close timestamp + symbol (unique per trade)
-            def _trade_key(r: dict) -> str:
-                ct = (r.get("closeTime") or r.get("closedAt") or
-                      r.get("closeTs") or r.get("ctime") or "")
-                return f"{ct}_{r.get('symbol', '')}"
-            seen = {_trade_key(r) for r in new_rows if isinstance(r, dict)}
-            merged = list(new_rows)
-            for r in existing_rows:
-                if isinstance(r, dict) and _trade_key(r) not in seen:
-                    merged.append(r)
-            # Trim to last 365 days to keep memory bounded while preserving full history
-            cutoff_ms = int((datetime.now(BKK) - timedelta(days=365)).timestamp() * 1000)
-            def _close_ms(r: dict) -> int:
-                for k in ("closeTime", "closedAt", "closeTs", "ctime"):
-                    v = r.get(k)
-                    if v:
-                        try:
-                            t = int(v)
-                            return t * 1000 if t < 10_000_000_000 else t
-                        except (TypeError, ValueError):
-                            pass
-                return cutoff_ms + 1  # keep if unknown
-            merged = [r for r in merged if _close_ms(r) > cutoff_ms]
+            merged = _merge_history_rows(existing_rows, new_rows)
             tc["history_raw"] = {"code": "200", "data": {"rows": merged}}
             _save_history(trader, merged)
             logger.info("History[%s]: merged %d new + kept old → %d total rows",
@@ -637,17 +687,46 @@ def _push_data(kind: str, data, trader: str = None):
             followers = int(str(copiers_raw).split("/")[0])
         except (TypeError, ValueError):
             followers = 0
+        # Preserve position-derived fields (open_pnl, open_position_count) that
+        # come from the separate elite_positions push, then re-derive below.
+        prev = _elite["data"] or {}
         _elite["data"] = {
             "balance": round(balance, 2),
             "all_time_pnl": round(all_time, 4),
             "daily_pnl": round(daily, 4),
             "aum": round(aum, 2),
             "follower_count": followers,
+            "open_pnl": prev.get("open_pnl", 0.0),
+            "open_position_count": prev.get("open_position_count", 0),
         }
         _elite["fetched_at"] = datetime.now(BKK).isoformat()
         _elite["error"] = None
+        _rebuild_elite()
         logger.info("Elite trader: balance=%.2f all_time=%.2f followers=%d",
                     balance, all_time, followers)
+    elif kind == "elite_positions":
+        # Open positions for the elite (lead) portfolio — same shape as the
+        # global tracePosition payload, parsed by _parse_positions.
+        _elite["positions_raw"] = data
+        _elite["fetched_at"] = datetime.now(BKK).isoformat()
+        _rebuild_elite()
+        pos = _elite.get("positions") or []
+        logger.info("Elite positions: %d open, open_pnl=%.2f",
+                    len(pos), (_elite["data"] or {}).get("open_pnl", 0.0))
+    elif kind == "elite_history":
+        # Closed-trade history for the elite portfolio — merged + persisted like
+        # trader history so it accumulates across poll cycles and redeploys.
+        new_rows = _extract_history_rows(data)
+        if new_rows:
+            existing_rows = _extract_history_rows(_elite.get("history_raw"))
+            merged = _merge_history_rows(existing_rows, new_rows)
+            _elite["history_raw"] = {"code": "200", "data": {"rows": merged}}
+            _save_history(_ELITE_HISTORY_KEY, merged)
+            logger.info("Elite history: merged %d new → %d total rows",
+                        len(new_rows), len(merged))
+        elif _elite.get("history_raw") is None:
+            _elite["history_raw"] = data
+        _rebuild_elite()
     elif kind == "fund_flow":
         # Futures copy trading transfer history — compute net investment.
         # Only applies to futures traders; ignore if type has already changed to cfd
@@ -751,6 +830,7 @@ def _rebuild_trader_summary(name: str) -> dict:
 
 
 def _rebuild_summary() -> None:
+    _rebuild_elite()   # refresh elite open/daily fields before aggregating
     all_trades = []
     total_balance = 0.0
     total_investment = 0.0
@@ -780,13 +860,22 @@ def _rebuild_summary() -> None:
         total_open_pnl = sum(p["unrealized_pnl"] for p in all_positions)
         total_open_count = len(all_positions)
 
+    # Elite (lead) portfolio is tracked like a trader: fold its open positions,
+    # open PnL and daily PnL into the grand totals so the dashboard reflects it.
+    elite_d = _elite["data"] or {}
+    total_open_pnl   += elite_d.get("open_pnl", 0.0)
+    total_open_count += elite_d.get("open_position_count", 0)
+    total_daily_pnl  += elite_d.get("daily_pnl", 0.0)
+
     # If API investment is available and positive, use it as the authoritative total
     if _investment.get("data") and _investment["data"].get("net", 0) > 0:
         total_investment = _investment["data"]["net"]
 
     cancelled_copy_pnl = round(_settings.get("cancelled_copy_pnl", 0.0), 2)
     cancelled_copy_count = _settings.get("cancelled_copy_count", 0)
-    elite_all_time_pnl = round(_settings.get("elite_all_time_pnl", 0.0), 2)
+    # Prefer the scraped elite all-time PnL; fall back to the manual settings value.
+    elite_all_time_pnl = round(elite_d.get("all_time_pnl") or
+                               _settings.get("elite_all_time_pnl", 0.0), 2)
 
     _mt5["summary"] = {
         "daily_pnl": round(total_daily_pnl, 4),
@@ -1173,6 +1262,8 @@ async def get_esp32():
         "bal":  round(elite_d.get("balance", 0.0), 2),
         "all":  round(elite_d.get("all_time_pnl") or elite_settings_pnl or 0.0, 2),
         "day":  round(elite_d.get("daily_pnl") or 0.0, 2),
+        "open": round(elite_d.get("open_pnl", 0.0), 2),
+        "pos":  int(elite_d.get("open_position_count", 0)),
         "aum":  round(elite_d.get("aum", 0.0), 2),
         "fans": int(elite_d.get("follower_count", 0)),
     }
@@ -1371,6 +1462,9 @@ async def get_elite():
         "daily_pnl": data.get("daily_pnl"),
         "aum": data.get("aum", 0.0),
         "follower_count": data.get("follower_count", 0),
+        "open_positions_pnl": data.get("open_pnl", 0.0),
+        "open_position_count": data.get("open_position_count", 0),
+        "positions": _elite.get("positions") or [],
         "fetched_at": _elite["fetched_at"],
         "error": _elite["error"],
         "available": _elite["data"] is not None or abs(settings_pnl) >= 0.01,
