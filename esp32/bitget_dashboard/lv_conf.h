@@ -21,8 +21,8 @@
 #define LV_COLOR_DEPTH      16
 #define LV_COLOR_16_SWAP    0
 
-// ── Memory for LVGL objects (bump if you add lots of trader cards) ──────────
-#define LV_MEM_SIZE         (48U * 1024U)
+// ── Memory for LVGL objects (portrait page builds many cards/rows) ──────────
+#define LV_MEM_SIZE         (64U * 1024U)
 
 // ── Tick source: use Arduino millis() so we don't need lv_tick_inc() ────────
 #define LV_TICK_CUSTOM              1

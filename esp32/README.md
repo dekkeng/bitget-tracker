@@ -13,17 +13,23 @@ ESP32  ──GET /api/esp32──▶  FastAPI backend  ──(already scraped)�
 
 ## What it shows
 
-- **OVERVIEW tab** — big total balance, status dot (green = fresh, amber = stale),
-  data timestamp, and a 2×3 grid: Today P&L, Open P&L, All-time P&L, Invested,
-  open Positions count, Earn balance. P&L values are green/red.
-- **TRADERS tab** — one card per active trader: name (★ = has open position),
-  balance, today's P&L, all-time P&L.
-- **ELITE tab** — your own elite (lead) trader portfolio tracked like a trader:
-  balance, today's / open / all-time P&L, AUM, follower count, open positions.
-  Shows "not an elite trader" if you only copy.
-- **STATUS tab** — WiFi SSID/IP/signal, data time, free heap, last fetch result.
+A **portrait (240×320), single scrolling page** that combines every income source
+in one view — drag up/down with the touch pen to scroll:
 
-Tap the tabs (or swipe) to switch screens.
+- **Header** — "BITGET", status dot (green = fresh, amber = stale), data time.
+- **Hero** — grand TOTAL BALANCE (everything: copy + elite + earn) and all-time P&L.
+- **Quick stats** — Today P&L, Open P&L, open Positions (green/red).
+- **Income sources** — balance broken down: Copy trading, Elite portfolio, Earn,
+  Invested.
+- **Elite portfolio** — balance, today / open / all-time P&L, AUM, followers, open
+  positions (hidden if you're not an elite trader).
+- **Earn** — earn balance (hidden if zero).
+- **Copy traders** — one card per active trader: name (★ = open position), balance,
+  today's and all-time P&L.
+- **Footer** — WiFi signal, free heap, last fetch status.
+
+Display is portrait via `tft.setRotation(0)`. To flip 180°, change it to `2` (and
+set `ts.setRotation(2)` to match).
 
 ## Backend endpoint
 
@@ -90,7 +96,8 @@ Also install the **ESP32 board package** (Espressif Systems) via Boards Manager.
 
 ## Touch calibration
 
-The default landscape calibration usually works. If taps land in the wrong place:
+Touch is used to **scroll** the page. The default portrait calibration usually
+works; if dragging/scrolling feels off or reversed:
 
 1. Set `#define TOUCH_DEBUG 1` near the top of the `.ino`.
 2. Upload, open Serial Monitor, and tap the four corners.
@@ -101,8 +108,8 @@ The default landscape calibration usually works. If taps land in the wrong place
 4. Set `TOUCH_DEBUG` back to `0`.
 
 If the display colours look inverted (red↔blue), remove `#define TFT_RGB_ORDER TFT_BGR`
-from `User_Setup.h`. If the image is mirrored/upside-down, change `tft.setRotation(1)`
-in `setup()` to `3` (and adjust touch rotation/calibration to match).
+from `User_Setup.h`. If the image is upside-down, change `tft.setRotation(0)` in
+`setup()` to `2` (and set `ts.setRotation(2)` to match).
 
 ## Pin reference (CYD ESP32-2432S028R)
 
