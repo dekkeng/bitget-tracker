@@ -471,13 +471,18 @@ def _rebuild_elite() -> None:
     today_start_ms, today_end_ms = _bkk_today_range_ms()
     daily = sum(t["pnl"] for t in trades
                 if today_start_ms <= t["close_time_ms"] < today_end_ms)
-    open_pnl = sum(p["unrealized_pnl"] for p in positions)
 
     # Daily: prefer trade-derived when we have history; else keep scraped value.
     if trades:
         d["daily_pnl"] = round(daily, 4)
-    d["open_pnl"] = round(open_pnl, 4)
-    d["open_position_count"] = len(positions)
+    # Open PnL: per-position sum when traderPosition returns rows; otherwise keep
+    # the floating PnL already set from the overview (unrealizedProfit).
+    if positions:
+        d["open_pnl"] = round(sum(p["unrealized_pnl"] for p in positions), 4)
+        d["open_position_count"] = len(positions)
+    else:
+        d.setdefault("open_pnl", 0.0)
+        d["open_position_count"] = 0
     # all_time_pnl: keep the scraped totalProfit (history window may be partial)
 
     _elite["trades"] = trades
@@ -709,22 +714,28 @@ def _push_data(kind: str, data, trader: str = None):
         if any(k in row for k in ("marginCall", "credit", "connecting")):
             logger.warning("Elite trader push rejected: row looks like a follower portfolio")
             return
-        # Fields from screenshot: equity, balance, aum, totalProfit, roi, copiers
-        balance     = _fv("balance", "equity", "totalBalance", "totalAsset", src=row)
-        all_time    = _fv("totalProfit", "allTimeProfit", "profit",
-                          "realizedPnl", "realPnl", "cumulativeProfit", src=row)
+        # Field names confirmed from /v1/trace/mt5/portfolio/overview (flattened):
+        #   totalEquity/estimatedAssets, profit, aum, roi, unrealizedProfit,
+        #   followProfit, waitShareProfit, curFollowCount/maxFollowCount.
+        balance     = _fv("totalEquity", "estimatedAssets", "balance", "equity",
+                          "totalBalance", "totalAsset", src=row)
+        all_time    = _fv("profit", "totalProfit", "allTimeProfit",
+                          "realizedPnl", "cumulativeProfit", src=row)
         daily       = _fv("dailyProfit", "todayProfit", "dailyPnl",
                           "dayProfit", "profit24h", src=row)
         aum         = _fv("aum", "totalAum", "aumAmount", src=row)
-        # Lead-trader income: profit share earned FROM copiers (our revenue as an
-        # elite), copiers' aggregate PnL, and ROI.
-        ps_earned   = _fv("totalProfitShare", "profitShareIncome", "sharedProfit",
-                          "profitShare", "settledProfitShare", "copierProfitShare",
-                          "earnedProfitShare", src=row)
-        copiers_pnl = _fv("copiersPnl", "copierPnl", "followerPnl", "copyPnl", src=row)
+        unreal      = _fv("unrealizedProfit", "floatProfit", "unrealizedPnl",
+                          "openPnl", src=row)
+        # Lead-trader income: profit share waiting to be released to us, and the
+        # aggregate profit our copiers have made.
+        ps_earned   = _fv("waitShareProfit", "totalProfitShare", "profitShareIncome",
+                          "sharedProfit", "settledProfitShare", "earnedProfitShare",
+                          src=row)
+        copiers_pnl = _fv("followProfit", "copiersPnl", "copierPnl", "followerPnl", src=row)
         roi         = _fv("roi", "roiRate", "returnRate", src=row, default=-99999.0)
-        copiers_raw = row.get("copiers") or row.get("followerCount") or \
-                      row.get("followCount") or row.get("currentFollowers") or "0"
+        copiers_raw = row.get("curFollowCount") or row.get("copiers") or \
+                      row.get("followerCount") or row.get("followCount") or \
+                      row.get("currentFollowers") or "0"
         # copiers may be "0/100" string or a plain int
         try:
             followers = int(str(copiers_raw).split("/")[0])
@@ -743,7 +754,9 @@ def _push_data(kind: str, data, trader: str = None):
             "copiers_pnl": round(copiers_pnl, 2),
             "roi": (round(roi * 100 if -1 <= roi <= 1 else roi, 2)
                     if roi != -99999.0 else None),
-            "open_pnl": prev.get("open_pnl", 0.0),
+            # Floating PnL from the overview; _rebuild_elite overrides this with
+            # the per-position sum when traderPosition returns open rows.
+            "open_pnl": round(unreal, 2) if unreal else prev.get("open_pnl", 0.0),
             "open_position_count": prev.get("open_position_count", 0),
         }
         _elite["fetched_at"] = datetime.now(BKK).isoformat()
