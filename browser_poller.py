@@ -844,6 +844,9 @@ async def _fetch_cancelled_copies(page, push_fn: Callable):
 
 # (method, endpoint) — tries both POST and GET for promising paths
 _ELITE_PROBES: list[tuple[str, str]] = [
+    # ── Confirmed via DevTools: the lead-trader portfolio overview ──────────
+    ("POST", "/v1/trace/mt5/portfolio/overview"),
+    ("GET",  "/v1/trace/mt5/portfolio/overview"),
     # ── Same trace/mt5 base, broader name variations ────────────────────────
     ("POST", "/v1/trace/mt5/trace/getTraderPortfolios"),
     ("POST", "/v1/trace/mt5/trace/getTraderPortfolio"),
@@ -967,9 +970,12 @@ async def _fetch_elite_trader(page, push_fn: Callable):
             if not isinstance(row, dict):
                 continue
             row_keys = set(row.keys())
+            # The DevTools-confirmed overview endpoint is trusted: accept its
+            # payload even if the key names differ from our heuristic set.
+            trusted = ep.endswith("/portfolio/overview")
             # Active follower portfolios also carry equity/totalProfit-style keys;
             # accepting one would double-count a balance already on a trader card.
-            if (_ELITE_KEYS & row_keys) and not (_ACTIVE_KEYS & row_keys):
+            if (trusted or (_ELITE_KEYS & row_keys)) and not (_ACTIVE_KEYS & row_keys):
                 _elite_ep     = ep
                 _elite_method = method
                 _capture_elite_pid(row)
@@ -1001,6 +1007,7 @@ _elite_hist_full_done = False
 # Open-position endpoints to try for the elite portfolio. tracePosition is the
 # confirmed-working MT5 positions endpoint; the rest are fallbacks. (method, ep)
 _ELITE_POS_PROBES: list[tuple[str, str]] = [
+    ("POST", "/v1/trace/mt5/data/traderPosition"),   # confirmed via DevTools (lead side)
     ("POST", "/v1/trace/mt5/data/tracePosition"),
     ("POST", "/v1/trace/mt5/trace/getTraderOpenPosition"),
     ("POST", "/v1/trace/mt5/trader/openPosition"),
@@ -1032,40 +1039,48 @@ async def _fetch_elite_positions(page, push_fn: Callable, pid: str):
     global _elite_pos_ep
     probes = [_elite_pos_ep] if _elite_pos_ep else [ep for _, ep in _ELITE_POS_PROBES]
     diag = []
+    done = False
     for ep in probes:
-        try:
-            result = await page.evaluate("""async ([ep, pid]) => {
-                try {
-                    const r = await fetch(ep, {
-                        method: 'POST', credentials: 'include',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({portfolioId: pid}),
-                    });
-                    const text = await r.text();
-                    if (text.trimStart().startsWith('<')) return {status: r.status, error: 'html_redirect'};
-                    const j = JSON.parse(text);
-                    const d = j?.data;
-                    const rows = Array.isArray(d) ? d : (d?.list || d?.rows || d?.positions || []);
-                    return {status: r.status, code: j?.code, msg: j?.msg,
-                            data: j?.data, rows: rows.length};
-                } catch(e) { return {status: 0, error: String(e)}; }
-            }""", [ep, pid])
-        except Exception as e:
-            diag.append({"ep": ep, "error": str(e)})
-            continue
+        if done:
+            break
+        # Try with the portfolio id and, as a fallback, an empty body (the
+        # lead-side endpoint may key off the session rather than a pid).
+        for body in ({"portfolioId": pid}, {}):
+            try:
+                result = await page.evaluate("""async ([ep, body]) => {
+                    try {
+                        const r = await fetch(ep, {
+                            method: 'POST', credentials: 'include',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(body),
+                        });
+                        const text = await r.text();
+                        if (text.trimStart().startsWith('<')) return {status: r.status, error: 'html_redirect'};
+                        const j = JSON.parse(text);
+                        const d = j?.data;
+                        const rows = Array.isArray(d) ? d : (d?.list || d?.rows || d?.positions || []);
+                        return {status: r.status, code: j?.code, msg: j?.msg,
+                                data: j?.data, rows: rows.length};
+                    } catch(e) { return {status: 0, error: String(e)}; }
+                }""", [ep, body])
+            except Exception as e:
+                diag.append({"ep": ep, "error": str(e)})
+                continue
 
-        http = result.get("status") if isinstance(result, dict) else 0
-        code = result.get("code")   if isinstance(result, dict) else None
-        diag.append({"ep": ep, "http": http, "code": code,
-                     "rows": result.get("rows"), "error": result.get("error")})
-        if result.get("error") == "html_redirect":
-            _status["auth_ok"] = False
-            break
-        if http == 200 and code in ("00000", "200", "0"):
-            _elite_pos_ep = ep
-            push_fn("elite_positions", result.get("data") or {})
-            logger.info("Elite positions ep=%s rows=%s", ep, result.get("rows"))
-            break
+            http = result.get("status") if isinstance(result, dict) else 0
+            code = result.get("code")   if isinstance(result, dict) else None
+            diag.append({"ep": ep, "body": "pid" if body else "empty", "http": http,
+                         "code": code, "rows": result.get("rows"), "error": result.get("error")})
+            if result.get("error") == "html_redirect":
+                _status["auth_ok"] = False
+                done = True
+                break
+            if http == 200 and code in ("00000", "200", "0"):
+                _elite_pos_ep = ep
+                push_fn("elite_positions", result.get("data") or {})
+                logger.info("Elite positions ep=%s rows=%s", ep, result.get("rows"))
+                done = True
+                break
     _status["elite_positions_probe"] = diag
 
 
