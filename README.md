@@ -1,6 +1,10 @@
 # Bitget Copy Trading Tracker
 
-A self-hosted portfolio dashboard for Bitget MT5 copy trading — tracks your follower account in real time via your session cookie, with a live gold price feed and an iPhone home screen widget.
+A self-hosted portfolio dashboard for Bitget MT5 copy trading — tracks your follower account(s), your elite (lead) portfolio, and Earn balances in real time via your session cookie, with a live gold price feed. Includes a responsive web dashboard, an iPhone home-screen widget, and an **ESP32 hardware dashboard** (see [`esp32/README.md`](esp32/README.md)).
+
+Runs on any host that can run Docker — **Railway** and **Render** are both covered below.
+
+> **Quick setup (TL;DR):** deploy the repo → set `TRADERS` + (recommended) `BITGET_API_KEY`/`BITGET_API_SECRET`/`BITGET_PASSPHRASE` + `BITGET_COOKIE` as env vars → open the dashboard. A persistent volume is optional but recommended (see [Persistence](#persistence)).
 
 ---
 
@@ -97,7 +101,10 @@ Note each `portfolioId` and the trader name you're copying.
 | `POLL_INTERVAL_SEC` | `30` | No (default: 30 s) |
 | `BITGET_API_KEY` | your Bitget API key | No (earn/deposits only) |
 | `BITGET_API_SECRET` | your Bitget API secret | No |
-| `BITGET_API_PASSPHRASE` | your Bitget passphrase | No |
+| `BITGET_PASSPHRASE` | your Bitget passphrase | No |
+| `BITGET_COOKIE` | full Bitget cookie string | No (restores cookie on redeploy) |
+
+> **Tip:** setting `BITGET_API_KEY` / `BITGET_API_SECRET` / `BITGET_PASSPHRASE` as env vars is the most reliable way to enable Earn + deposit tracking — they survive redeploys without needing a volume. (The exact var name is `BITGET_PASSPHRASE`, not `BITGET_API_PASSPHRASE`.)
 
 **`TRADERS` format:**
 ```
@@ -113,6 +120,16 @@ TRADERS=FuturesTrader:1234567890123456789:futures
 
 6. Click **Deploy** — first build takes ~3 minutes (installs Chromium)
 7. Your dashboard is live at `https://YOUR-SERVICE-NAME.onrender.com`
+
+#### Or deploy to Railway
+
+1. Go to [railway.app](https://railway.app) → **New Project → Deploy from GitHub repo** → pick your fork
+2. Railway builds from the `Dockerfile` automatically
+3. **Variables** tab → add the same env vars as the table above
+4. **Settings → Networking → Generate Domain** → your dashboard URL is `https://xxxx.up.railway.app`
+5. (Recommended) add a **Volume** mounted at `/data` and set the path vars — see [Persistence](#persistence)
+
+> Railway does **not** sleep on idle, so you can skip the UptimeRobot step (Step 6).
 
 ---
 
@@ -189,14 +206,59 @@ The widget auto-refreshes every 5–15 minutes in the background.
 ## Optional: Bitget API keys (earn + deposit tracking)
 
 Without API keys the tracker still shows all copy trading data. API keys add:
-- **Earn balance** (flexible savings — USDT + USDC shown separately)
+- **Earn balance** — flexible **and** fixed savings, every coin shown separately (USDT, USDGO, …)
 - **Deposit/withdrawal history** for net investment tracking
 
 To create API keys:
-1. Bitget → Avatar → **API Management → Create API**
-2. Permissions: **Read Only** — enable Spot + Futures read
-3. IP whitelist: `0.0.0.0/0` (open) or your Render outbound IP
-4. Add `BITGET_API_KEY`, `BITGET_API_SECRET`, `BITGET_API_PASSPHRASE` to Render env vars
+1. Bitget → Avatar → **API Management → Create API** (System-generated); set a passphrase
+2. Permissions: **Read Only** — enable Spot/Wallet read **and Earn/Wealth read** (needed for Earn)
+3. IP whitelist: leave **open / unrestricted** — Railway and Render use dynamic outbound IPs, so a locked IP will break it
+4. Add `BITGET_API_KEY`, `BITGET_API_SECRET`, `BITGET_PASSPHRASE` as env vars (recommended), or paste them in the dashboard under **Set Up Polling → API Keys**
+
+Verify at `/api/credentials/status` (`configured: true`) and `/api/earn` (`total > 0`).
+
+---
+
+## Persistence
+
+The app keeps runtime data in JSON files. Their paths are configurable via env vars so
+you can point them at a mounted volume:
+
+| Env var | Default | What it holds |
+|---------|---------|---------------|
+| `SETTINGS_PATH` | `settings.json` | manual overrides (balance, investment, elite/stopped P&L) |
+| `COOKIES_PATH` | `cookies.json` | the session cookie (incl. the auto-refreshed one) |
+| `TRADERS_PATH` | `traders.json` | traders added via the dashboard |
+| `HISTORY_PATH` | `history.json` | accumulated closed-trade history (built up over time) |
+| `CREDENTIALS_PATH` | `credentials.json` | API keys saved via the dashboard |
+
+**Do you need a volume?** Containers on Railway/Render have an **ephemeral** filesystem —
+files are wiped on every redeploy.
+
+- **Without a volume:** put credentials + cookie + traders in **env vars** (`BITGET_API_KEY`,
+  `BITGET_PASSPHRASE`, `BITGET_COOKIE`, `TRADERS`) and they survive redeploys. You'll still
+  lose accumulated trade history and any dashboard-entered overrides on each deploy (history
+  re-accumulates from scraping).
+- **With a volume (recommended):** mount it at `/data`, then set all five `*_PATH` vars to
+  `/data/<file>.json`. Everything persists, including the twice-daily auto-refreshed cookie.
+
+Writes never crash the app — if a path isn't writable the value is kept in memory and a
+warning is logged (so a missing volume can't 500 a save).
+
+---
+
+## ESP32 hardware dashboard
+
+A portrait LVGL dashboard for a **CYD ESP32-2432S028R** (2.8" 320×240 touch) that reads a
+single compact endpoint and shows totals + drill-down detail pages. Full wiring and flashing
+guide: **[`esp32/README.md`](esp32/README.md)**. It consumes these device endpoints:
+
+| URL | Description |
+|-----|-------------|
+| `/api/esp32` | Compact combined summary (balance, today, open, all-time, earn, elite, traders) |
+| `/api/esp32/positions` | Open positions (copy + elite) |
+| `/api/esp32/history?n=30` | Recent closed trades |
+| `/api/esp32/trader?name=…` | Full per-trader detail |
 
 ---
 
@@ -204,12 +266,16 @@ To create API keys:
 
 | URL | Description |
 |-----|-------------|
-| `/` | Main dashboard |
+| `/` | Main dashboard (responsive web UI) |
 | `/api/poller` | Scraper status — `auth_ok`, last scrape, cookie health |
 | `/api/mt5` | Portfolio summary (JSON) |
+| `/api/mt5/traders` | Per-trader summaries |
 | `/api/mt5/debug` | Raw cached data — useful for diagnosing field names |
 | `/api/prices` | Live XAU/USD price (public, no auth) |
-| `/api/earn` | Earn balance (requires API key) |
+| `/api/earn` | Earn balance + per-coin holdings (requires API key) |
+| `/api/elite` | Elite (lead) portfolio detail (requires the elite endpoint) |
+| `/api/credentials/status` | Whether API keys are configured |
+| `/api/widget` | Compact summary for the iPhone widget |
 
 ---
 

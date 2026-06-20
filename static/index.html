@@ -439,6 +439,41 @@
       .goal-ring-wrap svg { width: 140px; height: 140px; }
       .goal-remaining-text { font-size: 12px; }
     }
+
+    /* ── Responsive: centre the column on tablets/desktops ────────── */
+    header, #cookie-expired-banner, #conn-banner, #main-wrapper {
+      max-width: 880px; margin-left: auto; margin-right: auto;
+    }
+    #main-wrapper { width: 100%; }
+
+    /* ── Today hero — the focal point (today's income) ───────────── */
+    .today-hero {
+      padding: 24px 16px 22px 13px;
+      border-bottom: 1px solid var(--border);
+      border-left: 3px solid var(--green);
+      background: linear-gradient(180deg, rgba(0,196,122,0.07), transparent 70%);
+      transition: border-left-color .3s, background .3s;
+    }
+    .today-hero.neg {
+      border-left-color: var(--red);
+      background: linear-gradient(180deg, rgba(232,64,64,0.07), transparent 70%);
+    }
+    .today-hero #daily-pnl { font-size: 56px; letter-spacing: -3px; margin-bottom: 6px; }
+    .today-hero .section-label { margin-bottom: 6px; }
+
+    /* Section group heading (e.g. "My Accounts") */
+    .group-label {
+      font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px;
+      color: var(--muted); padding: 18px 16px 4px;
+    }
+
+    /* Desktop: two-column dashboard so it isn't a tall single strip */
+    @media (min-width: 760px) {
+      .today-hero #daily-pnl { font-size: 64px; }
+      .dash-grid { display: grid; grid-template-columns: 1fr 1fr; }
+      .dash-grid > .col-left, .dash-grid > .col-right { min-width: 0; }
+      .dash-grid > .col-right { border-left: 1px solid var(--border); }
+    }
   </style>
 </head>
 <body>
@@ -476,6 +511,19 @@
   </div>
 
   <div id="content" style="display:none">
+
+    <!-- Today's income — hero (focal point) -->
+    <div class="today-hero" id="daily-section">
+      <div class="section-label">Today's Income · Bangkok</div>
+      <div id="daily-pnl">—</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+        <div id="daily-sub">—</div>
+        <span id="daily-badge" class="trend-badge flat" style="display:none"></span>
+      </div>
+    </div>
+
+    <div class="dash-grid">
+     <div class="col-left">
 
     <!-- Balance -->
     <div class="section">
@@ -532,16 +580,6 @@
       </div>
     </div>
 
-    <!-- Daily PnL — accent section -->
-    <div class="daily-section" id="daily-section">
-      <div class="section-label">Daily P&amp;L · Bangkok</div>
-      <div id="daily-pnl">—</div>
-      <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
-        <div id="daily-sub">—</div>
-        <span id="daily-badge" class="trend-badge flat" style="display:none"></span>
-      </div>
-    </div>
-
     <!-- Stats cards — blocks.so bordered card grid -->
     <div class="stats-cards">
       <div class="stat-card">
@@ -572,6 +610,10 @@
       <div id="chart-tooltip"><div class="ct-date"></div><div class="ct-val"></div><div class="ct-daily"></div></div>
     </div>
 
+     </div><!-- /col-left -->
+     <div class="col-right">
+
+    <div class="group-label">Activity</div>
     <!-- Positions + History tabs -->
     <div class="tab-section">
       <div class="tab-bar">
@@ -586,6 +628,7 @@
       </div>
     </div>
 
+    <div class="group-label">My Accounts</div>
     <!-- Traders list -->
     <div id="traders-section" style="display:none">
       <div class="traders-header">
@@ -669,6 +712,9 @@
         </div>
       </div>
     </div>
+
+     </div><!-- /col-right -->
+    </div><!-- /dash-grid -->
 
   </div>
 </div>
@@ -1369,7 +1415,7 @@
       dpEl.textContent = fmt(mt5.daily_pnl);
       dpEl.className = 'daily-pnl-val ' + colorClass(mt5.daily_pnl);
       document.getElementById('daily-section').className =
-        'daily-section' + (mt5.daily_pnl < 0 ? ' neg' : '');
+        'today-hero' + (mt5.daily_pnl < 0 ? ' neg' : '');
 
       const bkkNow = new Date(Date.now() + 7 * 3600000);
       const bkkToday = bkkNow.toISOString().slice(0, 10);
@@ -1588,9 +1634,13 @@
     });
   }
 
+  let _resizeT;
   window.addEventListener('resize', () => {
-    const c = document.getElementById('chart-canvas');
-    if (c._history) drawChart(c._history);
+    clearTimeout(_resizeT);
+    _resizeT = setTimeout(() => {
+      const c = document.getElementById('chart-canvas');
+      if (c._history) drawChart(c._history);
+    }, 150);
   });
 
   // Settings modal
@@ -1730,11 +1780,21 @@
   }
 
   updatePollerStatus();
-  setInterval(updatePollerStatus, 10_000);
+  setInterval(() => { if (!document.hidden) updatePollerStatus(); }, 10_000);
 
   // Traders modal
   const tradersModal = document.getElementById('traders-modal');
   tradersModal.addEventListener('click', e => { if (e.target === tradersModal) tradersModal.classList.remove('active'); });
+
+  // Delegated handlers for the dynamic trader list — avoids interpolating
+  // user-controlled names into inline onclick (XSS / breakage with quotes).
+  document.getElementById('traders-modal-list').addEventListener('click', e => {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const name = btn.getAttribute('data-name');
+    if (btn.dataset.act === 'reset') resetTraderData(name);
+    else if (btn.dataset.act === 'remove') removeTrader(name);
+  });
 
   async function openTradersModal() {
     document.getElementById('trader-add-status').style.display = 'none';
@@ -1762,8 +1822,8 @@
           <div class="modal-trader-id">${esc(t.id)}</div>
         </div>
         <div style="display:flex;gap:6px;flex-shrink:0">
-          <button class="btn-reset-data" onclick="resetTraderData('${t.name}')" title="Clear cached balance/investment data">Reset data</button>
-          <button class="btn-remove" onclick="removeTrader('${t.name}')">Remove</button>
+          <button class="btn-reset-data" data-act="reset" data-name="${esc(t.name)}" title="Clear cached balance/investment data">Reset data</button>
+          <button class="btn-remove" data-act="remove" data-name="${esc(t.name)}">Remove</button>
         </div>
       </div>`;
     }).join('');
