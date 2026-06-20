@@ -19,10 +19,12 @@ on demand, so the home payload stays small.
 
 - **Home** — grand TOTAL BALANCE (copy + elite + earn), all-time P&L, quick stats
   (Today / Open / Positions), then a menu:
-  - **Copy Traders** — per-trader cards: balance, today / open / all-time P&L, open
-    positions (rendered from the home payload, no extra fetch).
-  - **Elite Portfolio** — balance, today / open / all-time, AUM, followers, plus the
-    elite's open positions (fetches `/api/elite`). Shown only if you're an elite.
+  - **Copy Traders** — per-trader cards (balance, today, all-time). Tap a trader →
+    full detail (`/api/esp32/trader`): equity, invested, ROI, gross vs net P&L,
+    profit share paid, share ratio %, follow days, margin level, start date.
+  - **Elite Portfolio** — balance, today / open / all-time, ROI, plus lead-trader
+    income (profit shared earned, copiers P&L), AUM, followers, and the elite's open
+    positions (fetches `/api/elite`). Shown only if you're an elite.
   - **Open Positions** — every open trade, copy + elite, with size/entry/PnL
     (fetches `/api/esp32/positions`).
   - **Trade History** — recent closed trades, newest first

@@ -60,9 +60,10 @@ static const uint16_t SCR_H = 320;
 
 /* ── Pages ───────────────────────────────────────────────────────────────── */
 enum Page { PAGE_HOME = 0, PAGE_TRADERS, PAGE_ELITE, PAGE_POSITIONS,
-            PAGE_HISTORY, PAGE_EARN };
+            PAGE_HISTORY, PAGE_EARN, PAGE_TRADER_DETAIL };
 static int  current_page = PAGE_HOME;
 static int  pending_nav  = -1;       // set by a button, handled in loop()
+static int  trader_detail_idx = 0;   // which trader to open on PAGE_TRADER_DETAIL
 static String lastPayload;           // cached /api/esp32 JSON
 
 /* ── Globals ─────────────────────────────────────────────────────────────── */
@@ -136,6 +137,16 @@ static bool httpGetJson(const String &path, JsonDocument &doc) {
   String s;
   if (!httpGet(path, s)) return false;
   return !deserializeJson(doc, s);
+}
+// Minimal percent-encoding for query values (trader names may contain spaces).
+static String urlenc(const char *s) {
+  String o;
+  for (const char *p = s; *p; p++) {
+    char c = *p;
+    if (isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.') o += c;
+    else { char b[4]; snprintf(b, sizeof(b), "%%%02X", (unsigned char)c); o += b; }
+  }
+  return o;
 }
 
 /* ── UI building blocks ──────────────────────────────────────────────────── */
@@ -213,6 +224,11 @@ static lv_obj_t *stat_tile(lv_obj_t *parent, const char *title, lv_obj_t **val) 
 /* ── Navigation ──────────────────────────────────────────────────────────── */
 static void nav_event(lv_event_t *e) {
   pending_nav = (int)(intptr_t)lv_event_get_user_data(e);
+}
+// Tap a trader card → open its detail page (user_data carries the trader index)
+static void trader_event(lv_event_t *e) {
+  trader_detail_idx = (int)(intptr_t)lv_event_get_user_data(e);
+  pending_nav = PAGE_TRADER_DETAIL;
 }
 
 static void load_screen(lv_obj_t *s) {
@@ -363,22 +379,79 @@ static void show_traders() {
   JsonArray traders = ok ? doc["traders"].as<JsonArray>() : JsonArray();
   if (!ok || traders.size() == 0) { info_label(s, "No active traders", COL_MUTED); load_screen(s); return; }
 
+  int idx = 0;
   for (JsonObject tr : traders) {
     const char *name = tr["n"] | "?";
     double bal = tr["bal"] | 0.0, day = tr["day"] | 0.0, all = tr["all"] | 0.0;
-    double open = tr["open"] | 0.0; int pos = tr["pos"] | 0;
     lv_obj_t *c = card(s);
-    lv_obj_t *nm = lv_label_create(c);            // trader name (prominent)
+    lv_obj_add_flag(c, LV_OBJ_FLAG_CLICKABLE);    // tap → trader detail page
+    lv_obj_add_event_cb(c, trader_event, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
+    // name + chevron
+    lv_obj_t *top = lv_obj_create(c);
+    lv_obj_set_width(top, LV_PCT(100));
+    lv_obj_set_height(top, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(top, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(top, 0, 0);
+    lv_obj_set_style_pad_all(top, 0, 0);
+    lv_obj_clear_flag(top, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(top, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *nm = lv_label_create(top);
     lv_label_set_text(nm, name);
     lv_obj_set_style_text_color(nm, COL_TEXT, 0);
     lv_obj_set_style_text_font(nm, &lv_font_montserrat_16, 0);
+    lv_obj_t *ch = lv_label_create(top);
+    lv_label_set_text(ch, LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_color(ch, COL_MUTED, 0);
     kv_set_usd(kv_row(c, "Balance"), bal);
     kv_set_pnl(kv_row(c, "Today"), day);
-    kv_set_pnl(kv_row(c, "Open P&L"), open);
     kv_set_pnl(kv_row(c, "All-time"), all);
-    char pb[24]; snprintf(pb, sizeof(pb), "%d", pos);
-    lv_label_set_text(kv_row(c, "Open positions"), pb);
+    idx++;
   }
+  load_screen(s);
+}
+
+/* ── TRADER DETAIL ───────────────────────────────────────────────────────── */
+static void kv_pct(lv_obj_t *v, double pct) { char b[16]; snprintf(b, sizeof(b), "%.2f%%", pct); lv_label_set_text(v, b); }
+
+static void show_trader_detail() {
+  current_page = PAGE_TRADER_DETAIL;
+  char name[24] = "Trader";
+  JsonDocument home;
+  if (lastPayload.length() && !deserializeJson(home, lastPayload)) {
+    JsonArray tr = home["traders"].as<JsonArray>();
+    if (trader_detail_idx >= 0 && trader_detail_idx < (int)tr.size()) {
+      const char *nm = tr[trader_detail_idx]["n"] | "Trader";
+      strncpy(name, nm, sizeof(name) - 1);
+    }
+  }
+  lv_obj_t *s = new_page(name, true);
+  JsonDocument doc;
+  String path = String("/api/esp32/trader?name=") + urlenc(name);
+  if (!httpGetJson(path, doc) || !(doc["ok"] | false)) {
+    info_label(s, "could not load", COL_AMBER); load_screen(s); return;
+  }
+  lv_obj_t *c = card(s);
+  kv_set_usd(kv_row(c, "Balance"), doc["bal"] | 0.0);
+  kv_set_usd(kv_row(c, "Equity"), doc["eq"] | 0.0);
+  kv_set_usd(kv_row(c, "Invested"), doc["inv"] | 0.0);
+  if (!doc["roi"].isNull()) kv_pct(kv_row(c, "ROI"), doc["roi"] | 0.0);
+  kv_set_pnl(kv_row(c, "Today"), doc["day"] | 0.0);
+  kv_set_pnl(kv_row(c, "Open P&L"), doc["open"] | 0.0);
+
+  lv_obj_t *c2 = card(s);
+  kv_set_pnl(kv_row(c2, "All-time (net)"), doc["all"] | 0.0);
+  kv_set_pnl(kv_row(c2, "Gross P&L"), doc["gall"] | 0.0);
+  kv_set_pnl(kv_row(c2, "Profit share paid"), -(double)(doc["sh"] | 0.0));
+  if (!doc["sr"].isNull()) kv_pct(kv_row(c2, "Share ratio"), doc["sr"] | 0.0);
+
+  lv_obj_t *c3 = card(s);
+  char b[24];
+  snprintf(b, sizeof(b), "%d", (int)(doc["pos"] | 0));
+  lv_label_set_text(kv_row(c3, "Open positions"), b);
+  if (!doc["fd"].isNull()) { snprintf(b, sizeof(b), "%d days", (int)(doc["fd"] | 0)); lv_label_set_text(kv_row(c3, "Following"), b); }
+  if (!doc["ml"].isNull()) { snprintf(b, sizeof(b), "%.0f%%", (double)(doc["ml"] | 0.0)); lv_label_set_text(kv_row(c3, "Margin level"), b); }
+  if (!doc["start"].isNull()) lv_label_set_text(kv_row(c3, "Started"), doc["start"] | "");
   load_screen(s);
 }
 
@@ -396,12 +469,18 @@ static void show_elite() {
   kv_set_pnl(kv_row(c, "Today"), el["day"] | 0.0);
   kv_set_pnl(kv_row(c, "Open P&L"), el["open"] | 0.0);
   kv_set_pnl(kv_row(c, "All-time"), el["all"] | 0.0);
-  kv_set_usd(kv_row(c, "AUM"), el["aum"] | 0.0);
+  if (!el["roi"].isNull()) kv_pct(kv_row(c, "ROI"), el["roi"] | 0.0);
+
+  // Lead-trader income
+  lv_obj_t *ci = card(s);
+  kv_set_usd(kv_row(ci, "Profit shared (earned)"), el["ps"] | 0.0);
+  kv_set_pnl(kv_row(ci, "Copiers P&L"), el["cp"] | 0.0);
+  kv_set_usd(kv_row(ci, "AUM"), el["aum"] | 0.0);
   char b[16];
   snprintf(b, sizeof(b), "%d", (int)(el["fans"] | 0));
-  lv_label_set_text(kv_row(c, "Followers"), b);
+  lv_label_set_text(kv_row(ci, "Followers"), b);
   snprintf(b, sizeof(b), "%d", (int)(el["pos"] | 0));
-  lv_label_set_text(kv_row(c, "Open positions"), b);
+  lv_label_set_text(kv_row(ci, "Open positions"), b);
 
   // Elite's open positions (live fetch)
   section_label(s, "OPEN POSITIONS");
@@ -499,6 +578,7 @@ static void navigate(int page) {
     case PAGE_POSITIONS: show_positions(); break;
     case PAGE_HISTORY:   show_history();   break;
     case PAGE_EARN:      show_earn();      break;
+    case PAGE_TRADER_DETAIL: show_trader_detail(); break;
     default:             show_home();      break;
   }
 }

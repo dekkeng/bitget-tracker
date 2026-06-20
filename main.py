@@ -606,6 +606,27 @@ def _push_data(kind: str, data, trader: str = None):
                     except (TypeError, ValueError):
                         pass
                     break
+            # Extra CFD copy-portfolio detail fields (real keys confirmed from
+            # getFollowPortfolios): share ratio, follow days, equity, margin health,
+            # start time. Stored so the trader detail page can show full info.
+            sr = _fv("shareRatio", "share_ratio", "profitSharingRatio", src=data, default=-1.0)
+            if sr >= 0:
+                ts["share_ratio"] = sr
+            fd = _fv("followDays", "followDay", "copyDays", src=data, default=-1.0)
+            if fd >= 0:
+                ts["follow_days"] = int(fd)
+            eq = _fv("equity", "netValue", "totalEquity", src=data, default=0.0)
+            if eq > 0:
+                ts["equity"] = round(eq, 2)
+            for fld, key in (("margin_level", "marginLevel"),
+                             ("margin_used", "marginUsed"),
+                             ("margin_free", "marginFree")):
+                v = _fv(key, src=data, default=-1.0)
+                if v >= 0:
+                    ts[fld] = round(v, 2)
+            st = _fv("startTime", "followStartTime", "createTime", src=data, default=0.0)
+            if st > 0:
+                ts["start_time_ms"] = int(st if st > 10_000_000_000 else st * 1000)
             if changed:
                 _save_settings(_settings)
     elif kind == "cancelled_copies":
@@ -695,6 +716,13 @@ def _push_data(kind: str, data, trader: str = None):
         daily       = _fv("dailyProfit", "todayProfit", "dailyPnl",
                           "dayProfit", "profit24h", src=row)
         aum         = _fv("aum", "totalAum", "aumAmount", src=row)
+        # Lead-trader income: profit share earned FROM copiers (our revenue as an
+        # elite), copiers' aggregate PnL, and ROI.
+        ps_earned   = _fv("totalProfitShare", "profitShareIncome", "sharedProfit",
+                          "profitShare", "settledProfitShare", "copierProfitShare",
+                          "earnedProfitShare", src=row)
+        copiers_pnl = _fv("copiersPnl", "copierPnl", "followerPnl", "copyPnl", src=row)
+        roi         = _fv("roi", "roiRate", "returnRate", src=row, default=-99999.0)
         copiers_raw = row.get("copiers") or row.get("followerCount") or \
                       row.get("followCount") or row.get("currentFollowers") or "0"
         # copiers may be "0/100" string or a plain int
@@ -711,14 +739,18 @@ def _push_data(kind: str, data, trader: str = None):
             "daily_pnl": round(daily, 4),
             "aum": round(aum, 2),
             "follower_count": followers,
+            "profit_share_earned": round(ps_earned, 2),
+            "copiers_pnl": round(copiers_pnl, 2),
+            "roi": (round(roi * 100 if -1 <= roi <= 1 else roi, 2)
+                    if roi != -99999.0 else None),
             "open_pnl": prev.get("open_pnl", 0.0),
             "open_position_count": prev.get("open_position_count", 0),
         }
         _elite["fetched_at"] = datetime.now(BKK).isoformat()
         _elite["error"] = None
         _rebuild_elite()
-        logger.info("Elite trader: balance=%.2f all_time=%.2f followers=%d",
-                    balance, all_time, followers)
+        logger.info("Elite trader: balance=%.2f all_time=%.2f followers=%d ps_earned=%.2f",
+                    balance, all_time, followers, ps_earned)
     elif kind == "elite_positions":
         # Open positions for the elite (lead) portfolio — same shape as the
         # global tracePosition payload, parsed by _parse_positions.
@@ -823,16 +855,36 @@ def _rebuild_trader_summary(name: str) -> dict:
     if open_pos_count == 0 and open_pnl != 0:
         open_pos_count = 1  # we know there's at least one
 
+    # Share ratio normalised to a percentage (Bitget sends 0.1 → 10%, or 10 → 10%)
+    sr_raw = ts.get("share_ratio")
+    share_ratio_pct = None
+    if sr_raw is not None:
+        share_ratio_pct = round(sr_raw * 100 if sr_raw <= 1 else sr_raw, 2)
+
+    start_ms = ts.get("start_time_ms")
+    start_date = _ms_to_bkk_date(start_ms) if start_ms else None
+
+    # Return on investment (net all-time vs invested)
+    roi_pct = round(net_all_time_pnl / investment * 100, 2) if investment > 0 else None
+
     summary = {
         "name": name,
         "type": _trader_type(name),
         "portfolio_id": _trader_id(name),
         "balance": balance,
         "investment": investment,
+        "equity": ts.get("equity", round(balance + open_pnl, 2)),
         "daily_pnl": round(daily_pnl, 4),
         "all_time_pnl": net_all_time_pnl,
         "gross_all_time_pnl": round(all_time_pnl, 4),
         "profit_share": round(profit_share, 2),
+        "share_ratio": share_ratio_pct,
+        "roi": roi_pct,
+        "follow_days": ts.get("follow_days"),
+        "margin_level": ts.get("margin_level"),
+        "margin_used": ts.get("margin_used"),
+        "margin_free": ts.get("margin_free"),
+        "start_date": start_date,
         "open_positions_pnl": open_pnl,
         "open_position_count": open_pos_count,
         "pushed_at": tc["pushed_at"],
@@ -1281,6 +1333,9 @@ async def get_esp32():
         "pos":  int(elite_d.get("open_position_count", 0)),
         "aum":  round(elite_d.get("aum", 0.0), 2),
         "fans": int(elite_d.get("follower_count", 0)),
+        "ps":   round(elite_d.get("profit_share_earned", 0.0), 2),
+        "cp":   round(elite_d.get("copiers_pnl", 0.0), 2),
+        "roi":  elite_d.get("roi"),
     }
 
     if not s:
@@ -1378,6 +1433,37 @@ async def get_esp32_history(n: int = 30):
             "p": round(t.get("pnl", 0.0), 2),
         })
     return {"trades": out}
+
+
+@app.get("/api/esp32/trader")
+async def get_esp32_trader(name: str):
+    """Full compact detail for one CFD/futures copy trader — for the device's
+    per-trader detail page (everything Bitget exposes about that copy)."""
+    if name not in _trader_names():
+        return {"ok": False, "error": "unknown trader"}
+    tc = _tc(name)
+    if tc["summary"] is None:
+        _rebuild_trader_summary(name)
+    s = tc["summary"] or {}
+    return {
+        "ok": True,
+        "n": s.get("name", name),
+        "type": s.get("type", "cfd"),
+        "bal":  round(s.get("balance", 0.0), 2),
+        "eq":   round(s.get("equity", 0.0), 2),
+        "inv":  round(s.get("investment", 0.0), 2),
+        "day":  round(s.get("daily_pnl", 0.0), 2),
+        "all":  round(s.get("all_time_pnl", 0.0), 2),       # net (after profit share)
+        "gall": round(s.get("gross_all_time_pnl", 0.0), 2),  # gross
+        "sh":   round(s.get("profit_share", 0.0), 2),        # profit share you've paid
+        "sr":   s.get("share_ratio"),                        # share ratio %
+        "roi":  s.get("roi"),                                # ROI %
+        "fd":   s.get("follow_days"),
+        "ml":   s.get("margin_level"),
+        "open": round(s.get("open_positions_pnl", 0.0), 2),
+        "pos":  int(s.get("open_position_count", 0)),
+        "start": s.get("start_date"),
+    }
 
 
 # ── Trader management endpoints ──────────────────────────────────────────────
@@ -1515,6 +1601,9 @@ async def get_elite():
         "daily_pnl": data.get("daily_pnl"),
         "aum": data.get("aum", 0.0),
         "follower_count": data.get("follower_count", 0),
+        "profit_share_earned": data.get("profit_share_earned", 0.0),
+        "copiers_pnl": data.get("copiers_pnl", 0.0),
+        "roi": data.get("roi"),
         "open_positions_pnl": data.get("open_pnl", 0.0),
         "open_position_count": data.get("open_position_count", 0),
         "positions": _elite.get("positions") or [],
