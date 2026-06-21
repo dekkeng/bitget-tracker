@@ -14,4 +14,4 @@ headless/data/
 esp32/wokwi/.cache/
 
 # ESP32 board secrets (WiFi password + private backend URL) — never push these
-esp32/bitget_dashboard/secrets.h
+esp32/*/secrets.h
