@@ -86,11 +86,19 @@ Also install the **ESP32 board package** (Espressif Systems) via Boards Manager.
    ```
    (`<Arduino>` is usually `Documents/Arduino` on Windows.)
 
-3. **Credentials** — open `bitget_dashboard/bitget_dashboard.ino` and edit:
-   ```c
-   WIFI_SSID, WIFI_PASS
-   SERVER_URL   // e.g. "https://bitget-tracker-xxxx.onrender.com"  (no trailing slash)
+3. **Credentials** — your WiFi + backend URL live in a **git-ignored** `secrets.h`
+   so they never get pushed. Copy the template and fill it in:
    ```
+   bitget_dashboard/secrets.example.h   →   bitget_dashboard/secrets.h
+   ```
+   Then edit `bitget_dashboard/secrets.h`:
+   ```c
+   WIFI_SSID, WIFI_PASS                 // your 2.4 GHz WiFi (ESP32 can't do 5 GHz)
+   SERVER_URL   // e.g. "https://bitget-tracker-xxxx.up.railway.app"  (no trailing slash)
+   ```
+   `secrets.h` is listed in `.gitignore`, so you fill it in once and never touch it
+   again — `git pull` / `git push` leave it alone, and the sketch keeps compiling.
+   `secrets.example.h` is the committed template (safe to push).
 
 4. **Board settings** in Arduino IDE:
    - Board: **ESP32 Dev Module**

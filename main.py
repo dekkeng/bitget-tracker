@@ -709,6 +709,9 @@ def _push_data(kind: str, data, trader: str = None):
         row = data if isinstance(data, dict) else {}
         if not row:
             return
+        # Debug: keep the raw Bitget row so /api/mt5/debug can reveal the exact
+        # field names (e.g. which one holds the all-time total profit share).
+        _elite["raw_row"] = dict(row)
         # Reject follower-portfolio shapes: those balances are already counted in
         # the trader cards, so accepting one here would double-count it.
         if any(k in row for k in ("marginCall", "credit", "connecting")):
@@ -1238,6 +1241,8 @@ async def get_mt5_debug():
         "cancelled_copy_pnl": _settings.get("cancelled_copy_pnl"),
         "cancelled_copy_count": _settings.get("cancelled_copy_count"),
         "cancelled_copies_probe": __import__("browser_poller")._status.get("cancelled_copies_probe"),
+        "elite_raw": _elite.get("raw_row"),
+        "elite_data": _elite.get("data"),
     }
 
 

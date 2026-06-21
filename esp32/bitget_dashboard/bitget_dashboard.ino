@@ -28,9 +28,9 @@
 #include <SPI.h>
 
 /* ── USER CONFIG ─────────────────────────────────────────────────────────── */
-static const char *WIFI_SSID = "YOUR_WIFI_SSID";
-static const char *WIFI_PASS = "YOUR_WIFI_PASSWORD";
-static const char *SERVER_URL = "https://YOUR-SERVICE-NAME.onrender.com";  // no trailing slash
+// WiFi credentials + backend URL live in secrets.h (git-ignored, never pushed).
+// First time: copy secrets.example.h → secrets.h and fill in your values.
+#include "secrets.h"
 static const uint32_t FETCH_INTERVAL_MS = 30000;
 
 /* ── Touch (XPT2046) — own SPI bus on the CYD ────────────────────────────── */
@@ -67,7 +67,7 @@ static int  trader_detail_idx = 0;   // which trader to open on PAGE_TRADER_DETA
 static String lastPayload;           // cached /api/esp32 JSON
 
 /* ── Globals ─────────────────────────────────────────────────────────────── */
-SPIClass touchSPI(VSPI);
+SPIClass touchSPI(HSPI);   // touch on its OWN SPI bus (display uses VSPI) — avoids the CYD touch-dead clash
 XPT2046_Touchscreen ts(XPT2046_CS, XPT2046_IRQ);
 TFT_eSPI tft = TFT_eSPI();
 static lv_disp_draw_buf_t draw_buf;
@@ -103,19 +103,44 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
   tft.endWrite();
   lv_disp_flush_ready(disp);
 }
+// Visual touch feedback: a small circle that flashes where you tap.
+static lv_obj_t *g_touch_dot = NULL;
+static uint32_t  g_dot_until = 0;
+
+static void make_touch_dot() {
+  g_touch_dot = lv_obj_create(lv_layer_top());
+  lv_obj_set_size(g_touch_dot, 28, 28);
+  lv_obj_set_style_radius(g_touch_dot, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(g_touch_dot, COL_ACCENT, 0);
+  lv_obj_set_style_bg_opa(g_touch_dot, LV_OPA_50, 0);
+  lv_obj_set_style_border_color(g_touch_dot, COL_TEXT, 0);
+  lv_obj_set_style_border_width(g_touch_dot, 2, 0);
+  lv_obj_set_style_border_opa(g_touch_dot, LV_OPA_80, 0);
+  lv_obj_clear_flag(g_touch_dot, LV_OBJ_FLAG_CLICKABLE);    // never block taps
+  lv_obj_clear_flag(g_touch_dot, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(g_touch_dot, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void touch_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
   if (ts.tirqTouched() && ts.touched()) {
     TS_Point p = ts.getPoint();
 #if TOUCH_DEBUG
     Serial.printf("touch raw: x=%d y=%d z=%d\n", p.x, p.y, p.z);
 #endif
-    int x = map(p.x, TS_MINX, TS_MAXX, 0, SCR_W);
-    int y = map(p.y, TS_MINY, TS_MAXY, 0, SCR_H);
-    data->point.x = constrain(x, 0, SCR_W - 1);
-    data->point.y = constrain(y, 0, SCR_H - 1);
+    int x = constrain(map(p.x, TS_MINX, TS_MAXX, 0, SCR_W), 0, SCR_W - 1);
+    int y = constrain(map(p.y, TS_MINY, TS_MAXY, 0, SCR_H), 0, SCR_H - 1);
+    data->point.x = x;
+    data->point.y = y;
     data->state = LV_INDEV_STATE_PRESSED;
+    if (g_touch_dot) {
+      lv_obj_set_pos(g_touch_dot, x - 14, y - 14);
+      lv_obj_clear_flag(g_touch_dot, LV_OBJ_FLAG_HIDDEN);
+      g_dot_until = millis() + 180;   // keep the flash visible briefly
+    }
   } else {
     data->state = LV_INDEV_STATE_RELEASED;
+    if (g_touch_dot && millis() >= g_dot_until)
+      lv_obj_add_flag(g_touch_dot, LV_OBJ_FLAG_HIDDEN);
   }
 }
 
@@ -248,31 +273,40 @@ static lv_obj_t *new_page(const char *title, bool back) {
   lv_obj_set_scroll_dir(s, LV_DIR_VER);
   lv_obj_set_scrollbar_mode(s, LV_SCROLLBAR_MODE_AUTO);
 
-  lv_obj_t *hd = lv_obj_create(s);
-  lv_obj_set_width(hd, LV_PCT(100));
-  lv_obj_set_height(hd, LV_SIZE_CONTENT);
-  lv_obj_set_style_bg_opa(hd, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_border_width(hd, 0, 0);
-  lv_obj_set_style_pad_all(hd, 0, 0);
-  lv_obj_clear_flag(hd, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_flex_flow(hd, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(hd, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  bool has_title = (title && title[0]);
+  if (back || has_title) {
+    lv_obj_t *hd = lv_obj_create(s);
+    lv_obj_set_width(hd, LV_PCT(100));
+    lv_obj_set_height(hd, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(hd, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(hd, 0, 0);
+    lv_obj_set_style_pad_all(hd, 0, 0);
+    lv_obj_clear_flag(hd, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(hd, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(hd, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-  if (back) {
-    lv_obj_t *b = lv_btn_create(hd);
-    lv_obj_set_style_bg_color(b, COL_CARD, 0);
-    lv_obj_set_style_pad_hor(b, 8, 0);
-    lv_obj_set_style_pad_ver(b, 4, 0);
-    lv_obj_add_event_cb(b, nav_event, LV_EVENT_CLICKED, (void *)(intptr_t)PAGE_HOME);
-    lv_obj_t *bl = lv_label_create(b);
-    lv_label_set_text(bl, LV_SYMBOL_LEFT);
-    lv_obj_set_style_text_color(bl, COL_TEXT, 0);
+    if (back) {
+      // Big, easy-to-tap Back button (44px tall, with a label).
+      lv_obj_t *b = lv_btn_create(hd);
+      lv_obj_set_style_bg_color(b, COL_CARD, 0);
+      lv_obj_set_height(b, 44);
+      lv_obj_set_style_pad_hor(b, 16, 0);
+      lv_obj_set_style_radius(b, 10, 0);
+      lv_obj_add_event_cb(b, nav_event, LV_EVENT_CLICKED, (void *)(intptr_t)PAGE_HOME);
+      lv_obj_t *bl = lv_label_create(b);
+      lv_label_set_text(bl, LV_SYMBOL_LEFT "  Back");
+      lv_obj_set_style_text_color(bl, COL_TEXT, 0);
+      lv_obj_set_style_text_font(bl, &lv_font_montserrat_16, 0);
+      lv_obj_center(bl);
+    }
+    if (has_title) {
+      lv_obj_t *t = lv_label_create(hd);
+      lv_label_set_text(t, title);
+      lv_obj_set_style_text_color(t, COL_TEXT, 0);
+      lv_obj_set_style_text_font(t, &lv_font_montserrat_16, 0);
+      lv_obj_set_style_pad_left(t, back ? 8 : 0, 0);
+    }
   }
-  lv_obj_t *t = lv_label_create(hd);
-  lv_label_set_text(t, title);
-  lv_obj_set_style_text_color(t, COL_TEXT, 0);
-  lv_obj_set_style_text_font(t, &lv_font_montserrat_16, 0);
-  lv_obj_set_style_pad_left(t, back ? 6 : 0, 0);
   return s;
 }
 
@@ -305,10 +339,22 @@ static void info_label(lv_obj_t *parent, const char *text, lv_color_t col) {
   lv_obj_set_style_text_color(l, col, 0);
 }
 
+// Prominent "TODAY P&L" headline card — used on top of every detail page.
+static void today_hero(lv_obj_t *parent, double day) {
+  lv_obj_t *h = card(parent);
+  lv_obj_set_style_pad_all(h, 12, 0);
+  info_label(h, "TODAY P&L", COL_MUTED);
+  char b[40]; fmtPnL(b, sizeof(b), day);
+  lv_obj_t *big = lv_label_create(h);
+  lv_label_set_text(big, b);
+  lv_obj_set_style_text_color(big, pnlColor(day), 0);
+  lv_obj_set_style_text_font(big, &lv_font_montserrat_28, 0);
+}
+
 /* ── HOME ────────────────────────────────────────────────────────────────── */
 static void show_home() {
   current_page = PAGE_HOME;
-  lv_obj_t *s = new_page("BITGET", false);
+  lv_obj_t *s = new_page(NULL, false);   // no title bar — reclaim the space for data
 
   JsonDocument doc;
   bool ok = lastPayload.length() && !deserializeJson(doc, lastPayload);
@@ -322,17 +368,17 @@ static void show_home() {
   bool eon = ok ? (bool)(doc["elite"]["on"] | false) : false;
   const char *upd = ok ? (const char *)(doc["upd"] | "--:--") : "--:--";
 
-  // Hero
+  // Hero — TODAY P&L is the headline; balance + all-time below it
   lv_obj_t *hero = card(s);
   lv_obj_set_style_pad_all(hero, 12, 0);
-  info_label(hero, "TOTAL BALANCE", COL_MUTED);
-  char b[48]; fmtUSD(b, sizeof(b), bal);
+  info_label(hero, "TODAY P&L", COL_MUTED);
+  char b[48]; fmtPnL(b, sizeof(b), day);
   lv_obj_t *bigb = lv_label_create(hero);
   lv_label_set_text(bigb, b);
-  lv_obj_set_style_text_color(bigb, COL_TEXT, 0);
+  lv_obj_set_style_text_color(bigb, pnlColor(day), 0);
   lv_obj_set_style_text_font(bigb, &lv_font_montserrat_28, 0);
-  lv_obj_t *at = kv_row(hero, "All-time P&L");
-  kv_set_pnl(at, all);
+  kv_set_usd(kv_row(hero, "Balance"), bal);
+  kv_set_pnl(kv_row(hero, "All-time P&L"), all);
 
   // Quick stats
   lv_obj_t *stats = lv_obj_create(s);
@@ -344,14 +390,14 @@ static void show_home() {
   lv_obj_clear_flag(stats, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(stats, LV_FLEX_FLOW_ROW);
   lv_obj_set_style_pad_column(stats, 8, 0);
-  lv_obj_t *vT, *vO, *vP;
-  stat_tile(stats, "TODAY", &vT);
+  lv_obj_t *vO, *vP, *vE;
   stat_tile(stats, "OPEN", &vO);
   stat_tile(stats, "POS", &vP);
-  kv_set_pnl(vT, day);
+  stat_tile(stats, "EARN", &vE);
   kv_set_pnl(vO, open);
   char nb[16]; snprintf(nb, sizeof(nb), "%d", npos);
   lv_label_set_text(vP, nb);
+  kv_set_usd(vE, earn);
 
   // Menu
   section_label(s, "DETAILS");
@@ -431,12 +477,13 @@ static void show_trader_detail() {
   if (!httpGetJson(path, doc) || !(doc["ok"] | false)) {
     info_label(s, "could not load", COL_AMBER); load_screen(s); return;
   }
+  today_hero(s, doc["day"] | 0.0);
+
   lv_obj_t *c = card(s);
   kv_set_usd(kv_row(c, "Balance"), doc["bal"] | 0.0);
   kv_set_usd(kv_row(c, "Equity"), doc["eq"] | 0.0);
   kv_set_usd(kv_row(c, "Invested"), doc["inv"] | 0.0);
   if (!doc["roi"].isNull()) kv_pct(kv_row(c, "ROI"), doc["roi"] | 0.0);
-  kv_set_pnl(kv_row(c, "Today"), doc["day"] | 0.0);
   kv_set_pnl(kv_row(c, "Open P&L"), doc["open"] | 0.0);
 
   lv_obj_t *c2 = card(s);
@@ -464,9 +511,10 @@ static void show_elite() {
   JsonObject el = ok ? doc["elite"].as<JsonObject>() : JsonObject();
   if (!(el["on"] | false)) { info_label(s, "Not an elite trader", COL_MUTED); load_screen(s); return; }
 
+  today_hero(s, el["day"] | 0.0);
+
   lv_obj_t *c = card(s);
   kv_set_usd(kv_row(c, "Balance"), el["bal"] | 0.0);
-  kv_set_pnl(kv_row(c, "Today"), el["day"] | 0.0);
   kv_set_pnl(kv_row(c, "Open P&L"), el["open"] | 0.0);
   kv_set_pnl(kv_row(c, "All-time"), el["all"] | 0.0);
   if (!el["roi"].isNull()) kv_pct(kv_row(c, "ROI"), el["roi"] | 0.0);
@@ -622,6 +670,7 @@ void setup() {
   indev_drv.type = LV_INDEV_TYPE_POINTER;
   indev_drv.read_cb = touch_read;
   lv_indev_drv_register(&indev_drv);
+  make_touch_dot();
 
   wifi_connect();
   httpGet("/api/esp32", lastPayload);   // prime the cache
