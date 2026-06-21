@@ -715,10 +715,9 @@ void setup() {
   tft.initDMA();                 // enable SPI DMA used by disp_flush()
   tft.fillScreen(TFT_BLACK);
 
-  // Skip TLS cert validation (LAN-ish dashboard) and shrink the TLS buffers to
-  // cut peak heap; the client persists so the connection is reused per fetch.
+  // Skip TLS cert validation (LAN-ish dashboard). The client persists so the
+  // TLS connection is reused per fetch instead of re-handshaking each time.
   s_client.setInsecure();
-  s_client.setBufferSizes(4096, 1024);
 
   lv_init();
   lv_disp_draw_buf_init(&draw_buf, buf1, buf2, SCR_W * 40);

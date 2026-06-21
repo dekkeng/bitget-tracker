@@ -22,8 +22,16 @@
 #define LV_COLOR_DEPTH      16
 #define LV_COLOR_16_SWAP    1
 
-// ── Memory for LVGL objects (portrait page builds many cards/rows) ──────────
-#define LV_MEM_SIZE         (64U * 1024U)
+// ── LVGL allocates from the system heap instead of a static 64KB pool.
+//    The CYD has no PSRAM and its static DRAM segment is nearly full; keeping
+//    the pool static overflowed dram0_0_seg once the double draw buffer was
+//    added. Heap-backed allocation frees that segment and lets LVGL share the
+//    large runtime heap with the TLS client. (LV_MEM_SIZE is ignored here.)
+#define LV_MEM_CUSTOM            1
+#define LV_MEM_CUSTOM_INCLUDE    <stdlib.h>
+#define LV_MEM_CUSTOM_ALLOC      malloc
+#define LV_MEM_CUSTOM_FREE       free
+#define LV_MEM_CUSTOM_REALLOC    realloc
 
 // ── Tick source: use Arduino millis() so we don't need lv_tick_inc() ────────
 #define LV_TICK_CUSTOM              1
