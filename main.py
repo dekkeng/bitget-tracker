@@ -1336,6 +1336,7 @@ async def get_esp32():
     """
     s = _mt5["summary"]
     earn_total  = round((_earn["data"] or {}).get("total", 0.0), 2)
+    earn_day    = round((_earn["data"] or {}).get("interest_24h") or 0.0, 2)  # today's earn interest
     elite_total = round((_elite["data"] or {}).get("balance", 0.0), 2)
 
     # Elite (lead) trader portfolio — present when the user is themselves an
@@ -1363,7 +1364,8 @@ async def get_esp32():
             "upd": datetime.now(BKK).strftime("%H:%M"),
             "bal": round(_settings.get("balance", 0.0) + earn_total + elite_total, 2),
             "inv": round(_settings.get("investment", 0.0), 2),
-            "day": 0.0, "open": 0.0, "npos": 0, "all": 0.0, "earn": earn_total,
+            "day": 0.0, "open": 0.0, "npos": 0, "all": 0.0,
+            "earn": earn_total, "eday": earn_day,
             "traders": [], "elite": elite,
         }
 
@@ -1410,6 +1412,7 @@ async def get_esp32():
         "npos": int(s["open_positions"]),
         "all":  round(s["all_time_pnl"], 2),
         "earn": earn_total,
+        "eday": earn_day,
         "traders": traders,
         "elite": elite,
     }

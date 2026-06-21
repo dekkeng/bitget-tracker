@@ -1,20 +1,26 @@
 /* ============================================================================
- *  Bitget Tracker — ESP32 LVGL Dashboard  (PORTRAIT, menu + sub-pages)
+ *  Bitget Tracker — ESP32 LVGL Dashboard  (LANDSCAPE, 320x240)
  *  Board : CYD "Cheap Yellow Display" ESP32-2432S028R
  *          ESP32 + ILI9341 320x240 SPI TFT + XPT2046 resistive touch
  *
- *  HOME shows the combined totals + a tappable menu. Each menu item opens a
- *  detail sub-page (with a Back button) that loads its data on demand:
- *      Home        → grand total, all-time, today/open/positions + menu
- *      Traders     → per-trader cards (from the home payload, no extra fetch)
- *      Elite       → elite portfolio detail + its open positions
- *      Positions   → all OPEN trades (copy + elite)   GET /api/esp32/positions
- *      History     → recent CLOSED trades             GET /api/esp32/history
- *      Earn        → earn balance + per-coin holdings  GET /api/earn
+ *  Same data + endpoints as the portrait sketch — only the orientation and the
+ *  page layouts differ. Designed for a wide, short screen:
+ *      Home      → the focus. Big TODAY P&L + balance/all-time on the LEFT, a
+ *                  compact OPEN/POS/EARN panel on the RIGHT, a small (muted)
+ *                  menu row underneath. Everything fits with no scrolling.
+ *      Traders   → per-trader cards, tiled 2-up across the width
+ *      Elite     → elite portfolio + open positions, tiled 2-up
+ *      Positions → all OPEN trades (copy + elite), tiled 2-up
+ *      History   → recent CLOSED trades, tiled 2-up
+ *      Earn      → earn balance + per-coin holdings
  *
  *  The device never talks to Bitget directly — only this project's backend.
  *  Libraries: LVGL 8.3.x · TFT_eSPI · XPT2046_Touchscreen · ArduinoJson 7.x
- *  Setup: see esp32/README.md (copy User_Setup.h + lv_conf.h, fill creds below).
+ *  Setup: copy User_Setup.h + lv_conf.h as per esp32/README.md, fill secrets.h.
+ *
+ *  Orientation: tft.setRotation(1) (landscape). Use 3 to flip 180° (and set
+ *  ts.setRotation(3) to match). If touch lands on the wrong spot, calibrate
+ *  with TOUCH_DEBUG=1 and adjust TS_MINX/MAXX/MINY/MAXY below.
  * ========================================================================== */
 
 #include <Arduino.h>
@@ -26,10 +32,11 @@
 #include <TFT_eSPI.h>
 #include <XPT2046_Touchscreen.h>
 #include <SPI.h>
+#include <Preferences.h>
 
 /* ── USER CONFIG ─────────────────────────────────────────────────────────── */
-// WiFi credentials + backend URL live in secrets.h (git-ignored, never pushed).
-// First time: copy secrets.example.h → secrets.h and fill in your values.
+// secrets.h holds the FIRST-BOOT defaults (WIFI_SSID/WIFI_PASS/SERVER_URL).
+// Once you set WiFi/URL on-device they are saved to NVS and used instead.
 #include "secrets.h"
 static const uint32_t FETCH_INTERVAL_MS = 30000;
 
@@ -44,9 +51,12 @@ static const uint32_t FETCH_INTERVAL_MS = 30000;
 static int TS_MINX = 200,  TS_MAXX = 3700;
 static int TS_MINY = 240,  TS_MAXY = 3800;
 
-/* ── Display geometry (PORTRAIT) ─────────────────────────────────────────── */
-static const uint16_t SCR_W = 240;
-static const uint16_t SCR_H = 320;
+/* ── Display geometry — set at boot from the saved orientation ───────────── */
+// landscape = 320x240 (rotation 1), portrait = 240x320 (rotation 0).
+static bool     landscape = true;     // loaded from NVS in setup()
+static uint16_t SCR_W = 320;          // runtime — depends on orientation
+static uint16_t SCR_H = 240;
+#define PANEL_LONG  320               // longest panel dimension (for buffer sizing)
 
 /* ── Theme colours ───────────────────────────────────────────────────────── */
 #define COL_BG     lv_color_hex(0x0E1116)
@@ -59,8 +69,9 @@ static const uint16_t SCR_H = 320;
 #define COL_ACCENT lv_color_hex(0x4DA3FF)
 
 /* ── Pages ───────────────────────────────────────────────────────────────── */
-enum Page { PAGE_HOME = 0, PAGE_TRADERS, PAGE_ELITE, PAGE_POSITIONS,
-            PAGE_HISTORY, PAGE_EARN, PAGE_TRADER_DETAIL };
+enum Page { PAGE_HOME = 0, PAGE_MENU, PAGE_TRADERS, PAGE_ELITE, PAGE_POSITIONS,
+            PAGE_HISTORY, PAGE_EARN, PAGE_TRADER_DETAIL,
+            PAGE_CONFIG, PAGE_CFG_WIFI, PAGE_CFG_PASS, PAGE_CFG_URL };
 static int  current_page = PAGE_HOME;
 static int  pending_nav  = -1;       // set by a button, handled in loop()
 static int  trader_detail_idx = 0;   // which trader to open on PAGE_TRADER_DETAIL
@@ -69,22 +80,41 @@ static String lastPayload;           // cached /api/esp32 JSON
 // Home is built ONCE and kept alive; refreshes only update these label texts
 // (no teardown/rebuild → no heap churn, no full-screen flicker every 30s).
 static lv_obj_t *home_screen = NULL;
-static lv_obj_t *hl_today, *hl_bal, *hl_all, *hl_open, *hl_pos, *hl_earn, *hl_footer;
-static lv_obj_t *hm_elite, *hm_earn;   // conditional menu rows (shown/hidden)
+static lv_obj_t *hl_today, *hl_total, *hl_open, *hl_pos, *hl_all, *hl_earn, *hl_footer;
+static lv_obj_t *hl_earn_day;                  // today's earn interest box
+static lv_obj_t *hl_dot;                       // API/cookie status dot on the footer
+static bool g_fetch_ok = false;                // did the last /api/esp32 GET succeed?
+
+/* ── On-device config (saved to NVS, survives power-off until changed) ─────── */
+static Preferences prefs;
+static String cfg_ssid, cfg_pass, cfg_url;     // active settings
+#define MAX_SCAN 18
+static String  scan_ssid[MAX_SCAN];            // last WiFi scan results
+static int     scan_rssi[MAX_SCAN];
+static bool    scan_lock[MAX_SCAN];
+static uint8_t scan_ch[MAX_SCAN];              // channel → 2.4G (1-14) vs 5G (>14)
+static int     scan_n = 0;
+static String sel_ssid;                        // SSID chosen in the scan list
+static lv_obj_t *cfg_ta = NULL;                // active textarea (pass/url entry)
+static bool   g_apply_wifi = false;            // set by keyboard OK → reconnect in loop
+static bool   g_apply_url  = false;            // set by keyboard OK → refetch in loop
 
 /* ── Globals ─────────────────────────────────────────────────────────────── */
-SPIClass touchSPI(HSPI);   // touch on its OWN SPI bus (display uses VSPI) — avoids the CYD touch-dead clash
+SPIClass touchSPI(HSPI);   // touch on its OWN SPI bus (display uses VSPI)
 XPT2046_Touchscreen ts(XPT2046_CS, XPT2046_IRQ);
 TFT_eSPI tft = TFT_eSPI();
 static lv_disp_draw_buf_t draw_buf;
-// Double buffer, 40 lines each: ~8 flushes per full redraw (vs 32) and DMA can
-// transfer one buffer while LVGL renders into the other. 2 x 240 x 40 x 2B = ~38KB DRAM.
-static lv_color_t buf1[SCR_W * 40];
-static lv_color_t buf2[SCR_W * 40];
+// Double buffer sized for the LONGEST edge (320) x 30 lines so the same buffers
+// work in either orientation. DMA transfers one while LVGL renders the other.
+// 2 x 320 x 30 x 2B = ~38KB DRAM (LVGL's own pool is on the heap via lv_conf).
+#define DRAW_BUF_PX (PANEL_LONG * 30)
+static lv_color_t buf1[DRAW_BUF_PX];
+static lv_color_t buf2[DRAW_BUF_PX];
 static uint32_t last_fetch = 0;
+static bool g_reboot = false;         // set when orientation changes → restart in loop
 
 // One persistent TLS client + warm connection reuse — avoids a full ~1-2s
-// handshake (and its ~40KB heap spike) on every 30s refresh and every page tap.
+// handshake (and its heap spike) on every 30s refresh and every page tap.
 static WiFiClientSecure s_client;
 
 /* ── Formatting helpers ──────────────────────────────────────────────────── */
@@ -112,10 +142,7 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
   uint32_t w = area->x2 - area->x1 + 1, h = area->y2 - area->y1 + 1;
   tft.startWrite();
   tft.setAddrWindow(area->x1, area->y1, w, h);
-  // Non-blocking DMA push. With the double draw buffer LVGL renders the next
-  // chunk into the other buffer while this transfer runs; the next startWrite
-  // waits on the prior DMA. Byte-swap is done by LVGL (LV_COLOR_16_SWAP 1).
-  tft.pushPixelsDMA((uint16_t *)&color_p->full, w * h);
+  tft.pushPixelsDMA((uint16_t *)&color_p->full, w * h);   // non-blocking, byte-swap by LVGL
   tft.endWrite();
   lv_disp_flush_ready(disp);
 }
@@ -125,14 +152,14 @@ static uint32_t  g_dot_until = 0;
 
 static void make_touch_dot() {
   g_touch_dot = lv_obj_create(lv_layer_top());
-  lv_obj_set_size(g_touch_dot, 28, 28);
+  lv_obj_set_size(g_touch_dot, 26, 26);
   lv_obj_set_style_radius(g_touch_dot, LV_RADIUS_CIRCLE, 0);
   lv_obj_set_style_bg_color(g_touch_dot, COL_ACCENT, 0);
   lv_obj_set_style_bg_opa(g_touch_dot, LV_OPA_50, 0);
   lv_obj_set_style_border_color(g_touch_dot, COL_TEXT, 0);
   lv_obj_set_style_border_width(g_touch_dot, 2, 0);
   lv_obj_set_style_border_opa(g_touch_dot, LV_OPA_80, 0);
-  lv_obj_clear_flag(g_touch_dot, LV_OBJ_FLAG_CLICKABLE);    // never block taps
+  lv_obj_clear_flag(g_touch_dot, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_clear_flag(g_touch_dot, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(g_touch_dot, LV_OBJ_FLAG_HIDDEN);
 }
@@ -149,9 +176,9 @@ static void touch_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     data->point.y = y;
     data->state = LV_INDEV_STATE_PRESSED;
     if (g_touch_dot) {
-      lv_obj_set_pos(g_touch_dot, x - 14, y - 14);
+      lv_obj_set_pos(g_touch_dot, x - 13, y - 13);
       lv_obj_clear_flag(g_touch_dot, LV_OBJ_FLAG_HIDDEN);
-      g_dot_until = millis() + 180;   // keep the flash visible briefly
+      g_dot_until = millis() + 180;
     }
   } else {
     data->state = LV_INDEV_STATE_RELEASED;
@@ -160,12 +187,54 @@ static void touch_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
   }
 }
 
+/* ── Config storage (NVS) ────────────────────────────────────────────────── */
+static void cfg_load() {
+  prefs.begin("bitget", true);                 // read-only
+  cfg_ssid  = prefs.getString("ssid", WIFI_SSID);
+  cfg_pass  = prefs.getString("pass", WIFI_PASS);
+  cfg_url   = prefs.getString("url",  SERVER_URL);
+  landscape = prefs.getBool("land", true);     // default landscape
+  prefs.end();
+}
+static void cfg_save_orient(bool land) {
+  prefs.begin("bitget", false);
+  prefs.putBool("land", land);
+  prefs.end();
+  landscape = land;
+}
+static void cfg_save_wifi(const String &ssid, const String &pass) {
+  prefs.begin("bitget", false);
+  prefs.putString("ssid", ssid);
+  prefs.putString("pass", pass);
+  prefs.end();
+  cfg_ssid = ssid; cfg_pass = pass;
+}
+static void cfg_save_url(const String &url) {
+  prefs.begin("bitget", false);
+  prefs.putString("url", url);
+  prefs.end();
+  cfg_url = url;
+}
+// Blocking scan (~2s). Results kept in scan_ssid/_rssi/_lock for the list page.
+static void do_scan() {
+  WiFi.mode(WIFI_STA);
+  int n = WiFi.scanNetworks();
+  scan_n = (n > MAX_SCAN) ? MAX_SCAN : (n < 0 ? 0 : n);
+  for (int i = 0; i < scan_n; i++) {
+    scan_ssid[i] = WiFi.SSID(i);
+    scan_rssi[i] = WiFi.RSSI(i);
+    scan_lock[i] = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+    scan_ch[i]   = WiFi.channel(i);
+  }
+  WiFi.scanDelete();
+}
+
 /* ── Networking ──────────────────────────────────────────────────────────── */
 // Cache the raw body — used only for the home payload (other pages stream-parse).
 static bool httpGet(const String &path, String &out) {
   if (WiFi.status() != WL_CONNECTED) return false;
   HTTPClient http; http.setReuse(true); http.setTimeout(12000);
-  String url = String(SERVER_URL) + path;
+  String url = cfg_url + path;
   bool ok = url.startsWith("https") ? http.begin(s_client, url) : http.begin(url);
   if (!ok) return false;
   int code = http.GET();
@@ -174,12 +243,11 @@ static bool httpGet(const String &path, String &out) {
   http.end();
   return true;
 }
-// Parse straight from the socket stream — no big intermediate String, so far
-// less heap churn/fragmentation on the larger positions/history payloads.
+// Parse straight from the socket stream — no big intermediate String.
 static bool httpGetJson(const String &path, JsonDocument &doc) {
   if (WiFi.status() != WL_CONNECTED) return false;
   HTTPClient http; http.setReuse(true); http.setTimeout(12000);
-  String url = String(SERVER_URL) + path;
+  String url = cfg_url + path;
   bool ok = url.startsWith("https") ? http.begin(s_client, url) : http.begin(url);
   if (!ok) return false;
   int code = http.GET();
@@ -188,7 +256,6 @@ static bool httpGetJson(const String &path, JsonDocument &doc) {
   http.end();
   return !err;
 }
-// Minimal percent-encoding for query values (trader names may contain spaces).
 static String urlenc(const char *s) {
   String o;
   for (const char *p = s; *p; p++) {
@@ -200,26 +267,82 @@ static String urlenc(const char *s) {
 }
 
 /* ── UI building blocks ──────────────────────────────────────────────────── */
-static lv_obj_t *card(lv_obj_t *parent) {
+// Full-width card (vertical flex). Pass a width pct for tiled (2-up) layouts.
+static lv_obj_t *card_w(lv_obj_t *parent, lv_coord_t wpct) {
   lv_obj_t *c = lv_obj_create(parent);
-  lv_obj_set_width(c, LV_PCT(100));
+  lv_obj_set_width(c, wpct);
   lv_obj_set_height(c, LV_SIZE_CONTENT);
   lv_obj_set_style_bg_color(c, COL_CARD, 0);
   lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(c, 0, 0);
   lv_obj_set_style_radius(c, 10, 0);
-  lv_obj_set_style_pad_all(c, 10, 0);
+  lv_obj_set_style_pad_all(c, 9, 0);
   lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(c, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_style_pad_row(c, 4, 0);
+  lv_obj_set_style_pad_row(c, 3, 0);
   return c;
 }
+static lv_obj_t *card(lv_obj_t *parent)  { return card_w(parent, LV_PCT(100)); }
+
+// Transparent flex row — used to place equal-width tiles side by side on home.
+static lv_obj_t *hrow(lv_obj_t *parent) {
+  lv_obj_t *r = lv_obj_create(parent);
+  lv_obj_set_width(r, LV_PCT(100));
+  lv_obj_set_height(r, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(r, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(r, 0, 0);
+  lv_obj_set_style_pad_all(r, 0, 0);
+  lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(r, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(r, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(r, 6, 0);
+  return r;
+}
+
+// Vertical stat box: small muted title on top, big value below, and (optionally)
+// a small muted subtitle under that. Grows to fill its row equally. `vfont` sizes
+// the value (20pt fits $99,999.99 in a 2-across box). If `subout` is non-NULL it
+// receives the subtitle label (used for the open-positions count in the OPEN box).
+static lv_obj_t *vtilex(lv_obj_t *parent, const char *title, const lv_font_t *vfont,
+                        lv_obj_t **subout) {
+  lv_obj_t *c = lv_obj_create(parent);
+  lv_obj_set_flex_grow(c, 1);
+  lv_obj_set_height(c, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_color(c, COL_CARD, 0);
+  lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(c, 0, 0);
+  lv_obj_set_style_radius(c, 10, 0);
+  lv_obj_set_style_pad_all(c, 8, 0);
+  lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(c, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(c, 1, 0);
+  lv_obj_t *t = lv_label_create(c);
+  lv_label_set_text(t, title);
+  lv_obj_set_style_text_color(t, COL_MUTED, 0);
+  lv_obj_set_style_text_font(t, &lv_font_montserrat_12, 0);
+  lv_obj_t *v = lv_label_create(c);
+  lv_label_set_text(v, "--");
+  lv_obj_set_style_text_color(v, COL_TEXT, 0);
+  lv_obj_set_style_text_font(v, vfont, 0);
+  if (subout) {
+    lv_obj_t *sub = lv_label_create(c);
+    lv_label_set_text(sub, "");
+    lv_obj_set_style_text_color(sub, COL_MUTED, 0);
+    lv_obj_set_style_text_font(sub, &lv_font_montserrat_12, 0);
+    *subout = sub;
+  }
+  return v;
+}
+static lv_obj_t *vtile(lv_obj_t *parent, const char *title, const lv_font_t *vfont) {
+  return vtilex(parent, title, vfont, NULL);
+}
+
 static void section_label(lv_obj_t *parent, const char *text) {
   lv_obj_t *l = lv_label_create(parent);
   lv_label_set_text(l, text);
   lv_obj_set_style_text_color(l, COL_MUTED, 0);
   lv_obj_set_style_text_font(l, &lv_font_montserrat_12, 0);
-  lv_obj_set_style_pad_top(l, 4, 0);
+  lv_obj_set_style_pad_top(l, 2, 0);
 }
 // label-left / value-right row; returns the value label
 static lv_obj_t *kv_row(lv_obj_t *parent, const char *label) {
@@ -247,35 +370,18 @@ static void kv_set_pnl(lv_obj_t *v, double n) {
   char b[40]; fmtPnL(b, sizeof(b), n);
   lv_label_set_text(v, b); lv_obj_set_style_text_color(v, pnlColor(n), 0);
 }
+static void kv_pct(lv_obj_t *v, double pct) { char b[16]; snprintf(b, sizeof(b), "%.2f%%", pct); lv_label_set_text(v, b); }
 
-static lv_obj_t *stat_tile(lv_obj_t *parent, const char *title, lv_obj_t **val) {
-  lv_obj_t *c = lv_obj_create(parent);
-  lv_obj_set_flex_grow(c, 1);
-  lv_obj_set_height(c, 56);
-  lv_obj_set_style_bg_color(c, COL_CARD, 0);
-  lv_obj_set_style_border_width(c, 0, 0);
-  lv_obj_set_style_radius(c, 10, 0);
-  lv_obj_set_style_pad_all(c, 4, 0);
-  lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_flex_flow(c, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_flex_align(c, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_t *t = lv_label_create(c);
-  lv_label_set_text(t, title);
-  lv_obj_set_style_text_color(t, COL_MUTED, 0);
-  lv_obj_set_style_text_font(t, &lv_font_montserrat_12, 0);
-  lv_obj_t *v = lv_label_create(c);
-  lv_label_set_text(v, "--");
-  lv_obj_set_style_text_color(v, COL_TEXT, 0);
-  lv_obj_set_style_text_font(v, &lv_font_montserrat_16, 0);
-  *val = v;
-  return c;
+static void info_label(lv_obj_t *parent, const char *text, lv_color_t col) {
+  lv_obj_t *l = lv_label_create(parent);
+  lv_label_set_text(l, text);
+  lv_obj_set_style_text_color(l, col, 0);
 }
 
 /* ── Navigation ──────────────────────────────────────────────────────────── */
 static void nav_event(lv_event_t *e) {
   pending_nav = (int)(intptr_t)lv_event_get_user_data(e);
 }
-// Tap a trader card → open its detail page (user_data carries the trader index)
 static void trader_event(lv_event_t *e) {
   trader_detail_idx = (int)(intptr_t)lv_event_get_user_data(e);
   pending_nav = PAGE_TRADER_DETAIL;
@@ -289,8 +395,7 @@ static void show_sub(lv_obj_t *s) {
   if (prev && prev != home_screen && prev != s) lv_obj_del(prev);
 }
 
-// Fresh screen with a header (title + optional Back button). Content is appended
-// to the returned screen directly (it is a scrolling flex column).
+// Fresh sub-page: header (Back + title) then a vertical scroll column.
 static lv_obj_t *new_page(const char *title, bool back) {
   lv_obj_t *s = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(s, COL_BG, 0);
@@ -313,17 +418,16 @@ static lv_obj_t *new_page(const char *title, bool back) {
     lv_obj_set_flex_align(hd, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     if (back) {
-      // Big, easy-to-tap Back button (44px tall, with a label).
       lv_obj_t *b = lv_btn_create(hd);
       lv_obj_set_style_bg_color(b, COL_CARD, 0);
-      lv_obj_set_height(b, 44);
-      lv_obj_set_style_pad_hor(b, 16, 0);
-      lv_obj_set_style_radius(b, 10, 0);
+      lv_obj_set_height(b, 38);
+      lv_obj_set_style_pad_hor(b, 14, 0);
+      lv_obj_set_style_radius(b, 9, 0);
       lv_obj_add_event_cb(b, nav_event, LV_EVENT_CLICKED, (void *)(intptr_t)PAGE_HOME);
       lv_obj_t *bl = lv_label_create(b);
       lv_label_set_text(bl, LV_SYMBOL_LEFT "  Back");
       lv_obj_set_style_text_color(bl, COL_TEXT, 0);
-      lv_obj_set_style_text_font(bl, &lv_font_montserrat_16, 0);
+      lv_obj_set_style_text_font(bl, &lv_font_montserrat_14, 0);
       lv_obj_center(bl);
     }
     if (has_title) {
@@ -331,41 +435,10 @@ static lv_obj_t *new_page(const char *title, bool back) {
       lv_label_set_text(t, title);
       lv_obj_set_style_text_color(t, COL_TEXT, 0);
       lv_obj_set_style_text_font(t, &lv_font_montserrat_16, 0);
-      lv_obj_set_style_pad_left(t, back ? 8 : 0, 0);
+      lv_obj_set_style_pad_left(t, back ? 10 : 0, 0);
     }
   }
   return s;
-}
-
-// A tappable menu row: label left, chevron right → navigates to `target`.
-// Returns the row so callers can show/hide it (elite/earn are conditional).
-static lv_obj_t *menu_item(lv_obj_t *parent, const char *text, int target) {
-  lv_obj_t *b = lv_obj_create(parent);
-  lv_obj_set_width(b, LV_PCT(100));
-  lv_obj_set_height(b, LV_SIZE_CONTENT);
-  lv_obj_set_style_bg_color(b, COL_CARD, 0);
-  lv_obj_set_style_border_width(b, 0, 0);
-  lv_obj_set_style_radius(b, 10, 0);
-  lv_obj_set_style_pad_all(b, 12, 0);
-  lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_set_flex_flow(b, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(b, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_add_event_cb(b, nav_event, LV_EVENT_CLICKED, (void *)(intptr_t)target);
-  lv_obj_t *l = lv_label_create(b);
-  lv_label_set_text(l, text);
-  lv_obj_set_style_text_color(l, COL_TEXT, 0);
-  lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
-  lv_obj_t *ch = lv_label_create(b);
-  lv_label_set_text(ch, LV_SYMBOL_RIGHT);
-  lv_obj_set_style_text_color(ch, COL_MUTED, 0);
-  return b;
-}
-
-static void info_label(lv_obj_t *parent, const char *text, lv_color_t col) {
-  lv_obj_t *l = lv_label_create(parent);
-  lv_label_set_text(l, text);
-  lv_obj_set_style_text_color(l, col, 0);
 }
 
 // Prominent "TODAY P&L" headline card — used on top of every detail page.
@@ -380,55 +453,148 @@ static void today_hero(lv_obj_t *parent, double day) {
   lv_obj_set_style_text_font(big, &lv_font_montserrat_28, 0);
 }
 
-/* ── HOME ────────────────────────────────────────────────────────────────── */
-// Build the home screen ONCE. Value labels are stashed in globals so refreshes
-// only call lv_label_set_text() instead of rebuilding the whole object tree.
-static void build_home() {
-  home_screen = new_page(NULL, false);   // no title bar — reclaim the space for data
-  lv_obj_t *s = home_screen;
-
-  // Hero — TODAY P&L is the headline; balance + all-time below it
-  lv_obj_t *hero = card(s);
-  lv_obj_set_style_pad_all(hero, 12, 0);
-  info_label(hero, "TODAY P&L", COL_MUTED);
-  hl_today = lv_label_create(hero);
-  lv_label_set_text(hl_today, "--");
-  lv_obj_set_style_text_font(hl_today, &lv_font_montserrat_28, 0);
-  hl_bal = kv_row(hero, "Balance");
-  hl_all = kv_row(hero, "All-time P&L");
-
-  // Quick stats
-  lv_obj_t *stats = lv_obj_create(s);
-  lv_obj_set_width(stats, LV_PCT(100));
-  lv_obj_set_height(stats, LV_SIZE_CONTENT);
-  lv_obj_set_style_bg_opa(stats, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_border_width(stats, 0, 0);
-  lv_obj_set_style_pad_all(stats, 0, 0);
-  lv_obj_clear_flag(stats, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_flex_flow(stats, LV_FLEX_FLOW_ROW);
-  lv_obj_set_style_pad_column(stats, 8, 0);
-  stat_tile(stats, "OPEN", &hl_open);
-  stat_tile(stats, "POS", &hl_pos);
-  stat_tile(stats, "EARN", &hl_earn);
-
-  // Menu — elite/earn rows always built, shown/hidden in update_home()
-  section_label(s, "DETAILS");
-  menu_item(s, "Copy Traders", PAGE_TRADERS);
-  hm_elite = menu_item(s, "Elite Portfolio", PAGE_ELITE);
-  menu_item(s, "Open Positions", PAGE_POSITIONS);
-  menu_item(s, "Trade History", PAGE_HISTORY);
-  hm_earn = menu_item(s, "Earn", PAGE_EARN);
-
-  // Footer
-  hl_footer = lv_label_create(s);
-  lv_label_set_text(hl_footer, "");
-  lv_obj_set_style_text_color(hl_footer, COL_MUTED, 0);
+// Compact, MUTED menu button for the home row (rarely tapped → not prominent).
+static lv_obj_t *menu_btn(lv_obj_t *parent, const char *text, int target) {
+  lv_obj_t *b = lv_btn_create(parent);
+  lv_obj_set_height(b, 34);
+  lv_obj_set_style_bg_color(b, COL_CARD, 0);
+  lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+  lv_obj_set_style_pad_hor(b, 12, 0);
+  lv_obj_set_style_radius(b, 9, 0);
+  lv_obj_set_style_shadow_width(b, 0, 0);
+  lv_obj_add_event_cb(b, nav_event, LV_EVENT_CLICKED, (void *)(intptr_t)target);
+  lv_obj_t *l = lv_label_create(b);
+  lv_label_set_text(l, text);
+  lv_obj_set_style_text_color(l, COL_MUTED, 0);
+  lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
+  lv_obj_center(l);
+  return b;
 }
 
-// Refresh the home labels in place from the cached payload — no allocations.
+// Full-width list row for the Menu picker page: label left, chevron right.
+static void menu_row(lv_obj_t *parent, const char *text, int target) {
+  lv_obj_t *b = lv_obj_create(parent);
+  lv_obj_set_width(b, LV_PCT(100));
+  lv_obj_set_height(b, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_color(b, COL_CARD, 0);
+  lv_obj_set_style_border_width(b, 0, 0);
+  lv_obj_set_style_radius(b, 10, 0);
+  lv_obj_set_style_pad_all(b, 14, 0);
+  lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_flex_flow(b, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(b, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_add_event_cb(b, nav_event, LV_EVENT_CLICKED, (void *)(intptr_t)target);
+  lv_obj_t *l = lv_label_create(b);
+  lv_label_set_text(l, text);
+  lv_obj_set_style_text_color(l, COL_TEXT, 0);
+  lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
+  lv_obj_t *ch = lv_label_create(b);
+  lv_label_set_text(ch, LV_SYMBOL_RIGHT);
+  lv_obj_set_style_text_color(ch, COL_MUTED, 0);
+}
+
+// Force a box (the parent card of a value label) to a fixed height and centre
+// its content vertically — used to make every box in a landscape row equal.
+static void box_h(lv_obj_t *value_label, lv_coord_t h) {
+  lv_obj_t *c = lv_obj_get_parent(value_label);
+  lv_obj_set_height(c, h);
+  lv_obj_set_flex_align(c, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+}
+
+// Small round API/cookie status dot (colour set later in update_home()).
+static lv_obj_t *status_dot(lv_obj_t *parent) {
+  lv_obj_t *d = lv_obj_create(parent);
+  lv_obj_set_size(d, 12, 12);
+  lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(d, COL_MUTED, 0);
+  lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(d, 0, 0);
+  lv_obj_clear_flag(d, LV_OBJ_FLAG_SCROLLABLE);
+  return d;
+}
+
+/* ── HOME (the focus) ────────────────────────────────────────────────────── */
+// Built ONCE; refreshes only update label texts (build-once = no flicker/churn).
+// Each figure gets its own box. OPEN P&L is first (most important) and carries
+// the open-positions count; TODAY P&L is its own box. LANDSCAPE puts OPEN | TODAY
+// side by side, then the rest below. A tiny Menu button sits bottom-right.
+static void build_home_landscape() {
+  home_screen = lv_obj_create(NULL);
+  lv_obj_t *s = home_screen;
+  lv_obj_set_style_bg_color(s, COL_BG, 0);
+  lv_obj_set_style_pad_all(s, 6, 0);
+  lv_obj_set_style_pad_row(s, 6, 0);
+  lv_obj_set_flex_flow(s, LV_FLEX_FLOW_COLUMN);
+  lv_obj_clear_flag(s, LV_OBJ_FLAG_SCROLLABLE);   // everything fits → no scroll
+
+  // 3 rows x 2 boxes. Boxes in each row share one fixed height (box_h) so the
+  // grid lines up neatly. OPEN P&L is first (with the open-positions count).
+  lv_obj_t *rHero = hrow(s);
+  hl_open  = vtilex(rHero, "OPEN P&L (now)", &lv_font_montserrat_20, &hl_pos);
+  hl_today = vtile (rHero, "TODAY P&L", &lv_font_montserrat_20);
+  box_h(hl_open, 68); box_h(hl_today, 68);
+
+  lv_obj_t *rB = hrow(s);
+  hl_total = vtile(rB, "TOTAL BALANCE", &lv_font_montserrat_20);
+  hl_all   = vtile(rB, "ALL-TIME P&L", &lv_font_montserrat_20);
+  box_h(hl_total, 54); box_h(hl_all, 54);
+
+  // Earn split: TODAY EARN on the left, EARN BALANCE on the right.
+  lv_obj_t *rC = hrow(s);
+  hl_earn_day = vtile(rC, "TODAY EARN", &lv_font_montserrat_20);
+  hl_earn     = vtile(rC, "EARN BALANCE", &lv_font_montserrat_20);
+  box_h(hl_earn_day, 54); box_h(hl_earn, 54);
+
+  // Footer: status dot + text (grows) + a tiny Menu button (bottom-right).
+  lv_obj_t *rF = hrow(s);
+  hl_dot = status_dot(rF);
+  hl_footer = lv_label_create(rF);
+  lv_label_set_text(hl_footer, "");
+  lv_obj_set_flex_grow(hl_footer, 1);
+  lv_obj_set_style_text_color(hl_footer, COL_MUTED, 0);
+  lv_obj_set_style_text_font(hl_footer, &lv_font_montserrat_12, 0);
+  lv_obj_t *mb = menu_btn(rF, LV_SYMBOL_LIST, PAGE_MENU);
+  lv_obj_set_height(mb, 30);
+}
+
+// PORTRAIT (240x320): same boxes stacked. OPEN P&L first (big, + positions),
+// then TODAY, Total, All-time, Earn — each its own full-width box. Tiny Menu
+// button bottom-right. Scrolls if it ever overflows.
+static void build_home_portrait() {
+  home_screen = lv_obj_create(NULL);
+  lv_obj_t *s = home_screen;
+  lv_obj_set_style_bg_color(s, COL_BG, 0);
+  lv_obj_set_style_pad_all(s, 8, 0);
+  lv_obj_set_style_pad_row(s, 8, 0);
+  lv_obj_set_flex_flow(s, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_scroll_dir(s, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(s, LV_SCROLLBAR_MODE_AUTO);
+
+  lv_obj_t *r1 = hrow(s); hl_open     = vtilex(r1, "OPEN P&L (now)", &lv_font_montserrat_28, &hl_pos);
+  lv_obj_t *r2 = hrow(s); hl_today    = vtile (r2, "TODAY P&L", &lv_font_montserrat_28);
+  lv_obj_t *r3 = hrow(s); hl_total    = vtile (r3, "TOTAL BALANCE", &lv_font_montserrat_20);
+  lv_obj_t *r4 = hrow(s); hl_all      = vtile (r4, "ALL-TIME P&L", &lv_font_montserrat_20);
+  lv_obj_t *r5 = hrow(s); hl_earn_day = vtile (r5, "TODAY EARN", &lv_font_montserrat_20);
+  lv_obj_t *r6 = hrow(s); hl_earn     = vtile (r6, "EARN BALANCE", &lv_font_montserrat_20);
+
+  lv_obj_t *rF = hrow(s);
+  hl_dot = status_dot(rF);
+  hl_footer = lv_label_create(rF);
+  lv_label_set_text(hl_footer, "");
+  lv_obj_set_flex_grow(hl_footer, 1);
+  lv_obj_set_style_text_color(hl_footer, COL_MUTED, 0);
+  lv_obj_set_style_text_font(hl_footer, &lv_font_montserrat_12, 0);
+  lv_obj_t *mb = menu_btn(rF, LV_SYMBOL_LIST, PAGE_MENU);
+  lv_obj_set_height(mb, 30);
+}
+
+static void build_home() { landscape ? build_home_landscape() : build_home_portrait(); }
+
 static void update_home() {
   JsonDocument doc;
   bool ok = lastPayload.length() && !deserializeJson(doc, lastPayload);
+  bool pok = ok ? (bool)(doc["ok"] | false) : false;     // backend has live data
   bool stale = ok ? (doc["stale"] | true) : true;
   double bal = ok ? (double)(doc["bal"] | 0.0) : 0.0;
   double all = ok ? (double)(doc["all"] | 0.0) : 0.0;
@@ -436,29 +602,53 @@ static void update_home() {
   double open = ok ? (double)(doc["open"] | 0.0) : 0.0;
   int npos = ok ? (int)(doc["npos"] | 0) : 0;
   double earn = ok ? (double)(doc["earn"] | 0.0) : 0.0;
-  bool eon = ok ? (bool)(doc["elite"]["on"] | false) : false;
+  double eday = ok ? (double)(doc["eday"] | 0.0) : 0.0;
   const char *upd = ok ? (const char *)(doc["upd"] | "--:--") : "--:--";
 
   char b[48];
   fmtPnL(b, sizeof(b), day);
   lv_label_set_text(hl_today, b);
   lv_obj_set_style_text_color(hl_today, pnlColor(day), 0);
-  kv_set_usd(hl_bal, bal);
-  kv_set_pnl(hl_all, all);
-  kv_set_pnl(hl_open, open);
-  char nb[16]; snprintf(nb, sizeof(nb), "%d", npos);
+  char nb[28]; snprintf(nb, sizeof(nb), "%d open trade%s", npos, npos == 1 ? "" : "s");
   lv_label_set_text(hl_pos, nb);
+  kv_set_usd(hl_total, bal);
+  kv_set_pnl(hl_open, open);
+  kv_set_pnl(hl_all, all);
   kv_set_usd(hl_earn, earn);
+  if (hl_earn_day) kv_set_pnl(hl_earn_day, eday);   // today's earn interest (can be 0)
 
-  if (eon) lv_obj_clear_flag(hm_elite, LV_OBJ_FLAG_HIDDEN);
-  else     lv_obj_add_flag(hm_elite, LV_OBJ_FLAG_HIDDEN);
-  if (earn > 0.005) lv_obj_clear_flag(hm_earn, LV_OBJ_FLAG_HIDDEN);
-  else              lv_obj_add_flag(hm_earn, LV_OBJ_FLAG_HIDDEN);
+  // Status dot: red = can't reach backend, amber = reached but data stale /
+  // cookie expired (no fresh Bitget data), green = fetched & fresh.
+  lv_color_t dotc;
+  const char *st;
+  if (!g_fetch_ok || WiFi.status() != WL_CONNECTED) { dotc = COL_RED;   st = "offline"; }
+  else if (stale || !pok)                           { dotc = COL_AMBER; st = "stale"; }
+  else                                              { dotc = COL_GREEN; st = "updated"; }
+  if (hl_dot) lv_obj_set_style_bg_color(hl_dot, dotc, 0);
 
   char f[80];
-  snprintf(f, sizeof(f), "%s%s  ·  heap %uKB", stale ? "stale " : "updated ", upd,
+  snprintf(f, sizeof(f), "%s %s  ·  heap %uKB", st, upd,
            (unsigned)(ESP.getFreeHeap() / 1024));
   lv_label_set_text(hl_footer, f);
+}
+
+/* ── MENU PICKER ─────────────────────────────────────────────────────────── */
+// Single Menu button on home opens this list; each row drills into a detail page.
+static void show_menu() {
+  current_page = PAGE_MENU;
+  lv_obj_t *s = new_page("Menu", true);
+  JsonDocument doc;
+  bool ok = lastPayload.length() && !deserializeJson(doc, lastPayload);
+  bool eon  = ok ? (bool)(doc["elite"]["on"] | false) : false;
+  double earn = ok ? (double)(doc["earn"] | 0.0) : 0.0;
+
+  menu_row(s, "Copy Traders", PAGE_TRADERS);
+  if (eon) menu_row(s, "Elite Portfolio", PAGE_ELITE);
+  menu_row(s, "Open Positions", PAGE_POSITIONS);
+  menu_row(s, "Trade History", PAGE_HISTORY);
+  if (earn > 0.005) menu_row(s, "Earn", PAGE_EARN);
+  menu_row(s, LV_SYMBOL_SETTINGS "  Config", PAGE_CONFIG);
+  show_sub(s);
 }
 
 static void show_home() {
@@ -488,23 +678,10 @@ static void show_traders() {
     lv_obj_t *c = card(s);
     lv_obj_add_flag(c, LV_OBJ_FLAG_CLICKABLE);    // tap → trader detail page
     lv_obj_add_event_cb(c, trader_event, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
-    // name + chevron
-    lv_obj_t *top = lv_obj_create(c);
-    lv_obj_set_width(top, LV_PCT(100));
-    lv_obj_set_height(top, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(top, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(top, 0, 0);
-    lv_obj_set_style_pad_all(top, 0, 0);
-    lv_obj_clear_flag(top, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(top, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_t *nm = lv_label_create(top);
+    lv_obj_t *nm = lv_label_create(c);
     lv_label_set_text(nm, name);
     lv_obj_set_style_text_color(nm, COL_TEXT, 0);
     lv_obj_set_style_text_font(nm, &lv_font_montserrat_16, 0);
-    lv_obj_t *ch = lv_label_create(top);
-    lv_label_set_text(ch, LV_SYMBOL_RIGHT);
-    lv_obj_set_style_text_color(ch, COL_MUTED, 0);
     kv_set_usd(kv_row(c, "Balance"), bal);
     kv_set_pnl(kv_row(c, "Today"), day);
     kv_set_pnl(kv_row(c, "All-time"), all);
@@ -514,11 +691,9 @@ static void show_traders() {
 }
 
 /* ── TRADER DETAIL ───────────────────────────────────────────────────────── */
-static void kv_pct(lv_obj_t *v, double pct) { char b[16]; snprintf(b, sizeof(b), "%.2f%%", pct); lv_label_set_text(v, b); }
-
 static void show_trader_detail() {
   current_page = PAGE_TRADER_DETAIL;
-  char name[24] = "Trader";
+  char name[48] = "Trader";
   JsonDocument home;
   if (lastPayload.length() && !deserializeJson(home, lastPayload)) {
     JsonArray tr = home["traders"].as<JsonArray>();
@@ -575,7 +750,6 @@ static void show_elite() {
   kv_set_pnl(kv_row(c, "All-time"), el["all"] | 0.0);
   if (!el["roi"].isNull()) kv_pct(kv_row(c, "ROI"), el["roi"] | 0.0);
 
-  // Lead-trader income
   lv_obj_t *ci = card(s);
   kv_set_usd(kv_row(ci, "Profit shared (earned)"), el["ps"] | 0.0);
   kv_set_pnl(kv_row(ci, "Copiers P&L"), el["cp"] | 0.0);
@@ -586,7 +760,6 @@ static void show_elite() {
   snprintf(b, sizeof(b), "%d", (int)(el["pos"] | 0));
   lv_label_set_text(kv_row(ci, "Open positions"), b);
 
-  // Elite's open positions (live fetch)
   section_label(s, "OPEN POSITIONS");
   JsonDocument ed;
   if (httpGetJson("/api/elite", ed)) {
@@ -644,8 +817,7 @@ static void show_history() {
     bool sh = strcmp((const char *)(t["d"] | "L"), "S") == 0;
     double pnl = t["p"] | 0.0;
     char lbl[48]; snprintf(lbl, sizeof(lbl), "%s %s %s", when, sym, sh ? "S" : "L");
-    lv_obj_t *v = kv_row(c, lbl);
-    kv_set_pnl(v, pnl);
+    kv_set_pnl(kv_row(c, lbl), pnl);
   }
   show_sub(s);
 }
@@ -665,8 +837,8 @@ static void show_earn() {
 
   JsonArray items = doc["items"].as<JsonArray>();
   if (items.size() > 0) {
-    section_label(s, "HOLDINGS");
     lv_obj_t *ic = card(s);
+    info_label(ic, "HOLDINGS", COL_MUTED);
     for (JsonObject it : items) {
       const char *coin = it["coin"] | "?";
       kv_set_usd(kv_row(ic, coin), it["amount"] | 0.0);
@@ -675,8 +847,173 @@ static void show_earn() {
   show_sub(s);
 }
 
+/* ── CONFIG: Wi-Fi scan + on-screen keyboard + Server URL (saved to NVS) ───── */
+static void ssid_event(lv_event_t *e) {
+  int i = (int)(intptr_t)lv_event_get_user_data(e);
+  if (i >= 0 && i < scan_n) sel_ssid = scan_ssid[i];
+  pending_nav = PAGE_CFG_PASS;
+}
+static void kb_wifi_event(lv_event_t *e) {
+  lv_event_code_t c = lv_event_get_code(e);
+  if (c == LV_EVENT_READY) {            // checkmark → save + reconnect
+    cfg_save_wifi(sel_ssid, String(lv_textarea_get_text(cfg_ta)));
+    g_apply_wifi = true;
+  } else if (c == LV_EVENT_CANCEL) {    // close → back to the scan list
+    pending_nav = PAGE_CFG_WIFI;
+  }
+}
+static void kb_url_event(lv_event_t *e) {
+  lv_event_code_t c = lv_event_get_code(e);
+  if (c == LV_EVENT_READY) {
+    cfg_save_url(String(lv_textarea_get_text(cfg_ta)));
+    g_apply_url = true;
+  } else if (c == LV_EVENT_CANCEL) {
+    pending_nav = PAGE_CONFIG;
+  }
+}
+// Flip orientation, save to NVS, then reboot into the new orientation (in loop).
+static void orient_event(lv_event_t *e) {
+  cfg_save_orient(!landscape);
+  g_reboot = true;
+}
+
+// Plain (non-flex) screen with a Back chip + title — base for keyboard pages.
+static lv_obj_t *kb_page(const char *title, int back_target) {
+  lv_obj_t *s = lv_obj_create(NULL);
+  lv_obj_set_style_bg_color(s, COL_BG, 0);
+  lv_obj_clear_flag(s, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t *b = lv_btn_create(s);
+  lv_obj_set_style_bg_color(b, COL_CARD, 0);
+  lv_obj_set_size(b, 78, 34);
+  lv_obj_align(b, LV_ALIGN_TOP_LEFT, 6, 6);
+  lv_obj_set_style_radius(b, 9, 0);
+  lv_obj_set_style_shadow_width(b, 0, 0);
+  lv_obj_add_event_cb(b, nav_event, LV_EVENT_CLICKED, (void *)(intptr_t)back_target);
+  lv_obj_t *bl = lv_label_create(b);
+  lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+  lv_obj_set_style_text_font(bl, &lv_font_montserrat_14, 0);
+  lv_obj_center(bl);
+  lv_obj_t *t = lv_label_create(s);
+  lv_label_set_text(t, title);
+  lv_obj_set_style_text_color(t, COL_TEXT, 0);
+  lv_obj_set_style_text_font(t, &lv_font_montserrat_14, 0);
+  lv_obj_align(t, LV_ALIGN_TOP_LEFT, 92, 14);
+  lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
+  lv_obj_set_width(t, SCR_W - 100);
+  return s;
+}
+
+static void build_text_entry(const char *title, int back_target, const char *initial,
+                             bool password, lv_event_cb_t kb_cb) {
+  lv_obj_t *s = kb_page(title, back_target);
+  cfg_ta = lv_textarea_create(s);
+  lv_textarea_set_one_line(cfg_ta, true);
+  lv_textarea_set_password_mode(cfg_ta, password);
+  lv_textarea_set_text(cfg_ta, initial ? initial : "");
+  lv_obj_set_width(cfg_ta, LV_PCT(92));
+  lv_obj_align(cfg_ta, LV_ALIGN_TOP_MID, 0, 46);
+  lv_obj_t *kb = lv_keyboard_create(s);
+  lv_obj_set_size(kb, LV_PCT(100), LV_PCT(58));
+  lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_keyboard_set_textarea(kb, cfg_ta);
+  lv_obj_add_event_cb(kb, kb_cb, LV_EVENT_ALL, NULL);
+  show_sub(s);
+}
+
+static void show_cfg_pass() {
+  current_page = PAGE_CFG_PASS;
+  String title = String("Pass: ") + sel_ssid;
+  build_text_entry(title.c_str(), PAGE_CFG_WIFI, "", true, kb_wifi_event);
+}
+static void show_cfg_url() {
+  current_page = PAGE_CFG_URL;
+  build_text_entry("Server URL", PAGE_CONFIG, cfg_url.c_str(), false, kb_url_event);
+}
+
+static void show_cfg_wifi() {
+  current_page = PAGE_CFG_WIFI;
+  lv_obj_t *s = new_page("Wi-Fi networks", true);
+  menu_row(s, LV_SYMBOL_REFRESH "  Rescan", PAGE_CFG_WIFI);
+  do_scan();                                   // blocking ~2s
+  if (scan_n == 0) { info_label(s, "No networks found", COL_MUTED); show_sub(s); return; }
+  for (int i = 0; i < scan_n; i++) {
+    lv_obj_t *b = lv_obj_create(s);
+    lv_obj_set_width(b, LV_PCT(100));
+    lv_obj_set_height(b, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(b, COL_CARD, 0);
+    lv_obj_set_style_border_width(b, 0, 0);
+    lv_obj_set_style_radius(b, 10, 0);
+    lv_obj_set_style_pad_all(b, 12, 0);
+    lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_flex_flow(b, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(b, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_event_cb(b, ssid_event, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    lv_obj_t *nm = lv_label_create(b);
+    char nmtxt[48];
+    snprintf(nmtxt, sizeof(nmtxt), "%s (%s)", scan_ssid[i].c_str(),
+             scan_ch[i] > 14 ? "5G" : "2.4G");
+    lv_label_set_text(nm, nmtxt);
+    lv_obj_set_style_text_color(nm, COL_TEXT, 0);
+    lv_obj_set_style_text_font(nm, &lv_font_montserrat_14, 0);
+    lv_obj_set_flex_grow(nm, 1);
+    lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
+    lv_obj_t *rt = lv_label_create(b);
+    lv_label_set_text(rt, scan_lock[i] ? LV_SYMBOL_WIFI "*" : LV_SYMBOL_WIFI);
+    lv_obj_set_style_text_color(rt, COL_MUTED, 0);
+  }
+  show_sub(s);
+}
+
+static void show_config() {
+  current_page = PAGE_CONFIG;
+  lv_obj_t *s = new_page("Config", true);
+  lv_obj_t *c = card(s);
+  bool conn = (WiFi.status() == WL_CONNECTED);
+  lv_obj_t *v;
+  v = kv_row(c, "Wi-Fi");   lv_label_set_text(v, cfg_ssid.length() ? cfg_ssid.c_str() : "(none)");
+  v = kv_row(c, "Status");  lv_label_set_text(v, conn ? "connected" : "offline");
+                            lv_obj_set_style_text_color(v, conn ? COL_GREEN : COL_AMBER, 0);
+  lv_obj_t *cu = card(s);
+  info_label(cu, "Server URL", COL_MUTED);
+  lv_obj_t *ul = lv_label_create(cu);
+  lv_label_set_text(ul, cfg_url.c_str());
+  lv_obj_set_style_text_color(ul, COL_TEXT, 0);
+  lv_label_set_long_mode(ul, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(ul, LV_PCT(100));
+  menu_row(s, "Change Wi-Fi", PAGE_CFG_WIFI);
+  menu_row(s, "Change Server URL", PAGE_CFG_URL);
+
+  // Orientation toggle — saves and reboots into the chosen orientation.
+  lv_obj_t *ob = lv_obj_create(s);
+  lv_obj_set_width(ob, LV_PCT(100));
+  lv_obj_set_height(ob, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_color(ob, COL_CARD, 0);
+  lv_obj_set_style_border_width(ob, 0, 0);
+  lv_obj_set_style_radius(ob, 10, 0);
+  lv_obj_set_style_pad_all(ob, 14, 0);
+  lv_obj_clear_flag(ob, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(ob, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_flex_flow(ob, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(ob, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_add_event_cb(ob, orient_event, LV_EVENT_CLICKED, NULL);
+  lv_obj_t *ol = lv_label_create(ob);
+  lv_label_set_text(ol, "Orientation");
+  lv_obj_set_style_text_color(ol, COL_TEXT, 0);
+  lv_obj_set_style_text_font(ol, &lv_font_montserrat_16, 0);
+  lv_obj_t *ov = lv_label_create(ob);
+  lv_label_set_text(ov, landscape ? "Landscape " LV_SYMBOL_REFRESH : "Portrait " LV_SYMBOL_REFRESH);
+  lv_obj_set_style_text_color(ov, COL_ACCENT, 0);
+  show_sub(s);
+}
+
 static void navigate(int page) {
   switch (page) {
+    case PAGE_MENU:      show_menu();      break;
+    case PAGE_CONFIG:    show_config();    break;
+    case PAGE_CFG_WIFI:  show_cfg_wifi();  break;
+    case PAGE_CFG_PASS:  show_cfg_pass();  break;
+    case PAGE_CFG_URL:   show_cfg_url();   break;
     case PAGE_TRADERS:   show_traders();   break;
     case PAGE_ELITE:     show_elite();     break;
     case PAGE_POSITIONS: show_positions(); break;
@@ -690,7 +1027,7 @@ static void navigate(int page) {
 /* ── Arduino entry points ────────────────────────────────────────────────── */
 static void wifi_connect() {
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.begin(cfg_ssid.c_str(), cfg_pass.c_str());
   Serial.print("WiFi connecting");
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) {
@@ -701,26 +1038,28 @@ static void wifi_connect() {
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("\nBitget ESP32 Dashboard (menu) booting...");
+  Serial.println("\nBitget ESP32 Dashboard booting...");
+
+  cfg_load();                    // load saved Wi-Fi / URL / orientation first
+  uint8_t rot = landscape ? 1 : 0;
+  if (landscape) { SCR_W = 320; SCR_H = 240; } else { SCR_W = 240; SCR_H = 320; }
 
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, HIGH);
 
   touchSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
   ts.begin(touchSPI);
-  ts.setRotation(0);
+  ts.setRotation(rot);           // match the display orientation
 
   tft.begin();
-  tft.setRotation(0);
+  tft.setRotation(rot);
   tft.initDMA();                 // enable SPI DMA used by disp_flush()
   tft.fillScreen(TFT_BLACK);
 
-  // Skip TLS cert validation (LAN-ish dashboard). The client persists so the
-  // TLS connection is reused per fetch instead of re-handshaking each time.
-  s_client.setInsecure();
+  s_client.setInsecure();        // skip cert validation; client persists/reuses
 
   lv_init();
-  lv_disp_draw_buf_init(&draw_buf, buf1, buf2, SCR_W * 40);
+  lv_disp_draw_buf_init(&draw_buf, buf1, buf2, DRAW_BUF_PX);
   static lv_disp_drv_t disp_drv;
   lv_disp_drv_init(&disp_drv);
   disp_drv.hor_res = SCR_W; disp_drv.ver_res = SCR_H;
@@ -734,8 +1073,12 @@ void setup() {
   make_touch_dot();
 
   wifi_connect();
-  httpGet("/api/esp32", lastPayload);   // prime the cache
-  show_home();
+  if (WiFi.status() == WL_CONNECTED) {
+    g_fetch_ok = httpGet("/api/esp32", lastPayload);   // prime the cache
+    show_home();
+  } else {
+    show_config();                        // not connected → open Config to set Wi-Fi
+  }
   last_fetch = millis();
 }
 
@@ -743,19 +1086,34 @@ void loop() {
   lv_timer_handler();
   delay(5);
 
-  // Handle a queued navigation request from a button tap
   if (pending_nav >= 0) {
     int p = pending_nav;
     pending_nav = -1;
     navigate(p);
   }
+  // Orientation changed in Config → persist already done, just restart.
+  if (g_reboot) { delay(150); ESP.restart(); }
+  // Keyboard "OK" on the Wi-Fi password page → reconnect with the new creds.
+  if (g_apply_wifi) {
+    g_apply_wifi = false;
+    wifi_connect();
+    last_fetch = 0;                         // force an immediate fetch
+    navigate(WiFi.status() == WL_CONNECTED ? PAGE_HOME : PAGE_CFG_WIFI);
+  }
+  // Keyboard "OK" on the URL page → go home and refetch from the new URL.
+  if (g_apply_url) {
+    g_apply_url = false;
+    last_fetch = 0;
+    navigate(PAGE_HOME);
+  }
 
   uint32_t now = millis();
   if (now - last_fetch >= FETCH_INTERVAL_MS) {
     last_fetch = now;
-    if (WiFi.status() != WL_CONNECTED) wifi_connect();
-    if (httpGet("/api/esp32", lastPayload) && current_page == PAGE_HOME) {
-      show_home();   // refresh the summary in place
+    if (current_page == PAGE_HOME) {        // don't reconnect/fetch while in Config
+      if (WiFi.status() != WL_CONNECTED) wifi_connect();
+      g_fetch_ok = httpGet("/api/esp32", lastPayload);
+      if (home_screen) update_home();       // refresh labels + status dot (red on failure)
     }
   }
 }

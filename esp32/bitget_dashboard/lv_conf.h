@@ -46,6 +46,7 @@
 #define LV_FONT_MONTSERRAT_12   1
 #define LV_FONT_MONTSERRAT_14   1
 #define LV_FONT_MONTSERRAT_16   1
+#define LV_FONT_MONTSERRAT_20   1
 #define LV_FONT_MONTSERRAT_28   1
 #define LV_FONT_DEFAULT         &lv_font_montserrat_14
 
@@ -53,5 +54,8 @@
 #define LV_USE_LED          1
 #define LV_USE_TABVIEW      1
 #define LV_USE_LABEL        1
+#define LV_USE_TEXTAREA     1     // Config: password / URL entry fields
+#define LV_USE_KEYBOARD     1     // Config: on-screen keyboard
+#define LV_USE_BTNMATRIX    1     // (keyboard is built on a button matrix)
 
 #endif // LV_CONF_H
