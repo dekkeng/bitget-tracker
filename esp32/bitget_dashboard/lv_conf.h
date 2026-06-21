@@ -15,11 +15,12 @@
 
 #include <stdint.h>
 
-// ── Colour: 16-bit. Leave SWAP at 0 — the flush callback already passes
-//    swap=true to tft.pushColors(), so the byte-swap happens exactly once.
-//    (Setting both to "swap" double-swaps and corrupts every colour.)
+// ── Colour: 16-bit. SWAP must be 1 because the flush callback now uses
+//    tft.pushPixelsDMA(), which does NOT byte-swap (unlike the old
+//    pushColors(...,true)). LVGL byte-swaps here instead, exactly once.
+//    (If reds/blues invert, this flag and the flush method are out of sync.)
 #define LV_COLOR_DEPTH      16
-#define LV_COLOR_16_SWAP    0
+#define LV_COLOR_16_SWAP    1
 
 // ── Memory for LVGL objects (portrait page builds many cards/rows) ──────────
 #define LV_MEM_SIZE         (64U * 1024U)

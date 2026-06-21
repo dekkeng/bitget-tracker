@@ -66,13 +66,26 @@ static int  pending_nav  = -1;       // set by a button, handled in loop()
 static int  trader_detail_idx = 0;   // which trader to open on PAGE_TRADER_DETAIL
 static String lastPayload;           // cached /api/esp32 JSON
 
+// Home is built ONCE and kept alive; refreshes only update these label texts
+// (no teardown/rebuild → no heap churn, no full-screen flicker every 30s).
+static lv_obj_t *home_screen = NULL;
+static lv_obj_t *hl_today, *hl_bal, *hl_all, *hl_open, *hl_pos, *hl_earn, *hl_footer;
+static lv_obj_t *hm_elite, *hm_earn;   // conditional menu rows (shown/hidden)
+
 /* ── Globals ─────────────────────────────────────────────────────────────── */
 SPIClass touchSPI(HSPI);   // touch on its OWN SPI bus (display uses VSPI) — avoids the CYD touch-dead clash
 XPT2046_Touchscreen ts(XPT2046_CS, XPT2046_IRQ);
 TFT_eSPI tft = TFT_eSPI();
 static lv_disp_draw_buf_t draw_buf;
-static lv_color_t buf1[SCR_W * 10];
+// Double buffer, 40 lines each: ~8 flushes per full redraw (vs 32) and DMA can
+// transfer one buffer while LVGL renders into the other. 2 x 240 x 40 x 2B = ~38KB DRAM.
+static lv_color_t buf1[SCR_W * 40];
+static lv_color_t buf2[SCR_W * 40];
 static uint32_t last_fetch = 0;
+
+// One persistent TLS client + warm connection reuse — avoids a full ~1-2s
+// handshake (and its ~40KB heap spike) on every 30s refresh and every page tap.
+static WiFiClientSecure s_client;
 
 /* ── Formatting helpers ──────────────────────────────────────────────────── */
 static void fmtUSD(char *out, size_t n, double v) {
@@ -99,7 +112,10 @@ static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *c
   uint32_t w = area->x2 - area->x1 + 1, h = area->y2 - area->y1 + 1;
   tft.startWrite();
   tft.setAddrWindow(area->x1, area->y1, w, h);
-  tft.pushColors((uint16_t *)&color_p->full, w * h, true);
+  // Non-blocking DMA push. With the double draw buffer LVGL renders the next
+  // chunk into the other buffer while this transfer runs; the next startWrite
+  // waits on the prior DMA. Byte-swap is done by LVGL (LV_COLOR_16_SWAP 1).
+  tft.pushPixelsDMA((uint16_t *)&color_p->full, w * h);
   tft.endWrite();
   lv_disp_flush_ready(disp);
 }
@@ -145,12 +161,12 @@ static void touch_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
 }
 
 /* ── Networking ──────────────────────────────────────────────────────────── */
+// Cache the raw body — used only for the home payload (other pages stream-parse).
 static bool httpGet(const String &path, String &out) {
   if (WiFi.status() != WL_CONNECTED) return false;
-  WiFiClientSecure client; client.setInsecure();
-  HTTPClient http; http.setTimeout(12000);
+  HTTPClient http; http.setReuse(true); http.setTimeout(12000);
   String url = String(SERVER_URL) + path;
-  bool ok = url.startsWith("https") ? http.begin(client, url) : http.begin(url);
+  bool ok = url.startsWith("https") ? http.begin(s_client, url) : http.begin(url);
   if (!ok) return false;
   int code = http.GET();
   if (code != 200) { http.end(); return false; }
@@ -158,10 +174,19 @@ static bool httpGet(const String &path, String &out) {
   http.end();
   return true;
 }
+// Parse straight from the socket stream — no big intermediate String, so far
+// less heap churn/fragmentation on the larger positions/history payloads.
 static bool httpGetJson(const String &path, JsonDocument &doc) {
-  String s;
-  if (!httpGet(path, s)) return false;
-  return !deserializeJson(doc, s);
+  if (WiFi.status() != WL_CONNECTED) return false;
+  HTTPClient http; http.setReuse(true); http.setTimeout(12000);
+  String url = String(SERVER_URL) + path;
+  bool ok = url.startsWith("https") ? http.begin(s_client, url) : http.begin(url);
+  if (!ok) return false;
+  int code = http.GET();
+  if (code != 200) { http.end(); return false; }
+  DeserializationError err = deserializeJson(doc, http.getStream());
+  http.end();
+  return !err;
 }
 // Minimal percent-encoding for query values (trader names may contain spaces).
 static String urlenc(const char *s) {
@@ -256,10 +281,12 @@ static void trader_event(lv_event_t *e) {
   pending_nav = PAGE_TRADER_DETAIL;
 }
 
-static void load_screen(lv_obj_t *s) {
-  lv_obj_t *old = lv_scr_act();
+// Show a detail sub-page. The previous screen is deleted UNLESS it's the
+// persistent home screen, which must survive so we can return to it cheaply.
+static void show_sub(lv_obj_t *s) {
+  lv_obj_t *prev = lv_scr_act();
   lv_scr_load(s);
-  if (old && old != s) lv_obj_del(old);
+  if (prev && prev != home_screen && prev != s) lv_obj_del(prev);
 }
 
 // Fresh screen with a header (title + optional Back button). Content is appended
@@ -311,7 +338,8 @@ static lv_obj_t *new_page(const char *title, bool back) {
 }
 
 // A tappable menu row: label left, chevron right → navigates to `target`.
-static void menu_item(lv_obj_t *parent, const char *text, int target) {
+// Returns the row so callers can show/hide it (elite/earn are conditional).
+static lv_obj_t *menu_item(lv_obj_t *parent, const char *text, int target) {
   lv_obj_t *b = lv_obj_create(parent);
   lv_obj_set_width(b, LV_PCT(100));
   lv_obj_set_height(b, LV_SIZE_CONTENT);
@@ -331,6 +359,7 @@ static void menu_item(lv_obj_t *parent, const char *text, int target) {
   lv_obj_t *ch = lv_label_create(b);
   lv_label_set_text(ch, LV_SYMBOL_RIGHT);
   lv_obj_set_style_text_color(ch, COL_MUTED, 0);
+  return b;
 }
 
 static void info_label(lv_obj_t *parent, const char *text, lv_color_t col) {
@@ -352,10 +381,52 @@ static void today_hero(lv_obj_t *parent, double day) {
 }
 
 /* ── HOME ────────────────────────────────────────────────────────────────── */
-static void show_home() {
-  current_page = PAGE_HOME;
-  lv_obj_t *s = new_page(NULL, false);   // no title bar — reclaim the space for data
+// Build the home screen ONCE. Value labels are stashed in globals so refreshes
+// only call lv_label_set_text() instead of rebuilding the whole object tree.
+static void build_home() {
+  home_screen = new_page(NULL, false);   // no title bar — reclaim the space for data
+  lv_obj_t *s = home_screen;
 
+  // Hero — TODAY P&L is the headline; balance + all-time below it
+  lv_obj_t *hero = card(s);
+  lv_obj_set_style_pad_all(hero, 12, 0);
+  info_label(hero, "TODAY P&L", COL_MUTED);
+  hl_today = lv_label_create(hero);
+  lv_label_set_text(hl_today, "--");
+  lv_obj_set_style_text_font(hl_today, &lv_font_montserrat_28, 0);
+  hl_bal = kv_row(hero, "Balance");
+  hl_all = kv_row(hero, "All-time P&L");
+
+  // Quick stats
+  lv_obj_t *stats = lv_obj_create(s);
+  lv_obj_set_width(stats, LV_PCT(100));
+  lv_obj_set_height(stats, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(stats, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(stats, 0, 0);
+  lv_obj_set_style_pad_all(stats, 0, 0);
+  lv_obj_clear_flag(stats, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(stats, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(stats, 8, 0);
+  stat_tile(stats, "OPEN", &hl_open);
+  stat_tile(stats, "POS", &hl_pos);
+  stat_tile(stats, "EARN", &hl_earn);
+
+  // Menu — elite/earn rows always built, shown/hidden in update_home()
+  section_label(s, "DETAILS");
+  menu_item(s, "Copy Traders", PAGE_TRADERS);
+  hm_elite = menu_item(s, "Elite Portfolio", PAGE_ELITE);
+  menu_item(s, "Open Positions", PAGE_POSITIONS);
+  menu_item(s, "Trade History", PAGE_HISTORY);
+  hm_earn = menu_item(s, "Earn", PAGE_EARN);
+
+  // Footer
+  hl_footer = lv_label_create(s);
+  lv_label_set_text(hl_footer, "");
+  lv_obj_set_style_text_color(hl_footer, COL_MUTED, 0);
+}
+
+// Refresh the home labels in place from the cached payload — no allocations.
+static void update_home() {
   JsonDocument doc;
   bool ok = lastPayload.length() && !deserializeJson(doc, lastPayload);
   bool stale = ok ? (doc["stale"] | true) : true;
@@ -368,52 +439,37 @@ static void show_home() {
   bool eon = ok ? (bool)(doc["elite"]["on"] | false) : false;
   const char *upd = ok ? (const char *)(doc["upd"] | "--:--") : "--:--";
 
-  // Hero — TODAY P&L is the headline; balance + all-time below it
-  lv_obj_t *hero = card(s);
-  lv_obj_set_style_pad_all(hero, 12, 0);
-  info_label(hero, "TODAY P&L", COL_MUTED);
-  char b[48]; fmtPnL(b, sizeof(b), day);
-  lv_obj_t *bigb = lv_label_create(hero);
-  lv_label_set_text(bigb, b);
-  lv_obj_set_style_text_color(bigb, pnlColor(day), 0);
-  lv_obj_set_style_text_font(bigb, &lv_font_montserrat_28, 0);
-  kv_set_usd(kv_row(hero, "Balance"), bal);
-  kv_set_pnl(kv_row(hero, "All-time P&L"), all);
-
-  // Quick stats
-  lv_obj_t *stats = lv_obj_create(s);
-  lv_obj_set_width(stats, LV_PCT(100));
-  lv_obj_set_height(stats, LV_SIZE_CONTENT);
-  lv_obj_set_style_bg_opa(stats, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_border_width(stats, 0, 0);
-  lv_obj_set_style_pad_all(stats, 0, 0);
-  lv_obj_clear_flag(stats, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_flex_flow(stats, LV_FLEX_FLOW_ROW);
-  lv_obj_set_style_pad_column(stats, 8, 0);
-  lv_obj_t *vO, *vP, *vE;
-  stat_tile(stats, "OPEN", &vO);
-  stat_tile(stats, "POS", &vP);
-  stat_tile(stats, "EARN", &vE);
-  kv_set_pnl(vO, open);
+  char b[48];
+  fmtPnL(b, sizeof(b), day);
+  lv_label_set_text(hl_today, b);
+  lv_obj_set_style_text_color(hl_today, pnlColor(day), 0);
+  kv_set_usd(hl_bal, bal);
+  kv_set_pnl(hl_all, all);
+  kv_set_pnl(hl_open, open);
   char nb[16]; snprintf(nb, sizeof(nb), "%d", npos);
-  lv_label_set_text(vP, nb);
-  kv_set_usd(vE, earn);
+  lv_label_set_text(hl_pos, nb);
+  kv_set_usd(hl_earn, earn);
 
-  // Menu
-  section_label(s, "DETAILS");
-  menu_item(s, "Copy Traders", PAGE_TRADERS);
-  if (eon) menu_item(s, "Elite Portfolio", PAGE_ELITE);
-  menu_item(s, "Open Positions", PAGE_POSITIONS);
-  menu_item(s, "Trade History", PAGE_HISTORY);
-  if (earn > 0.005) menu_item(s, "Earn", PAGE_EARN);
+  if (eon) lv_obj_clear_flag(hm_elite, LV_OBJ_FLAG_HIDDEN);
+  else     lv_obj_add_flag(hm_elite, LV_OBJ_FLAG_HIDDEN);
+  if (earn > 0.005) lv_obj_clear_flag(hm_earn, LV_OBJ_FLAG_HIDDEN);
+  else              lv_obj_add_flag(hm_earn, LV_OBJ_FLAG_HIDDEN);
 
-  // Footer
   char f[80];
   snprintf(f, sizeof(f), "%s%s  ·  heap %uKB", stale ? "stale " : "updated ", upd,
            (unsigned)(ESP.getFreeHeap() / 1024));
-  info_label(s, f, COL_MUTED);
+  lv_label_set_text(hl_footer, f);
+}
 
-  load_screen(s);
+static void show_home() {
+  current_page = PAGE_HOME;
+  if (!home_screen) build_home();
+  update_home();
+  lv_obj_t *prev = lv_scr_act();
+  if (prev != home_screen) {              // arriving from a sub-page (or boot screen)
+    lv_scr_load(home_screen);
+    if (prev) lv_obj_del(prev);           // free the sub-page; home itself persists
+  }
 }
 
 /* ── TRADERS ─────────────────────────────────────────────────────────────── */
@@ -423,7 +479,7 @@ static void show_traders() {
   JsonDocument doc;
   bool ok = lastPayload.length() && !deserializeJson(doc, lastPayload);
   JsonArray traders = ok ? doc["traders"].as<JsonArray>() : JsonArray();
-  if (!ok || traders.size() == 0) { info_label(s, "No active traders", COL_MUTED); load_screen(s); return; }
+  if (!ok || traders.size() == 0) { info_label(s, "No active traders", COL_MUTED); show_sub(s); return; }
 
   int idx = 0;
   for (JsonObject tr : traders) {
@@ -454,7 +510,7 @@ static void show_traders() {
     kv_set_pnl(kv_row(c, "All-time"), all);
     idx++;
   }
-  load_screen(s);
+  show_sub(s);
 }
 
 /* ── TRADER DETAIL ───────────────────────────────────────────────────────── */
@@ -475,7 +531,7 @@ static void show_trader_detail() {
   JsonDocument doc;
   String path = String("/api/esp32/trader?name=") + urlenc(name);
   if (!httpGetJson(path, doc) || !(doc["ok"] | false)) {
-    info_label(s, "could not load", COL_AMBER); load_screen(s); return;
+    info_label(s, "could not load", COL_AMBER); show_sub(s); return;
   }
   today_hero(s, doc["day"] | 0.0);
 
@@ -499,7 +555,7 @@ static void show_trader_detail() {
   if (!doc["fd"].isNull()) { snprintf(b, sizeof(b), "%d days", (int)(doc["fd"] | 0)); lv_label_set_text(kv_row(c3, "Following"), b); }
   if (!doc["ml"].isNull()) { snprintf(b, sizeof(b), "%.0f%%", (double)(doc["ml"] | 0.0)); lv_label_set_text(kv_row(c3, "Margin level"), b); }
   if (!doc["start"].isNull()) lv_label_set_text(kv_row(c3, "Started"), doc["start"] | "");
-  load_screen(s);
+  show_sub(s);
 }
 
 /* ── ELITE ───────────────────────────────────────────────────────────────── */
@@ -509,7 +565,7 @@ static void show_elite() {
   JsonDocument doc;
   bool ok = lastPayload.length() && !deserializeJson(doc, lastPayload);
   JsonObject el = ok ? doc["elite"].as<JsonObject>() : JsonObject();
-  if (!(el["on"] | false)) { info_label(s, "Not an elite trader", COL_MUTED); load_screen(s); return; }
+  if (!(el["on"] | false)) { info_label(s, "Not an elite trader", COL_MUTED); show_sub(s); return; }
 
   today_hero(s, el["day"] | 0.0);
 
@@ -547,7 +603,7 @@ static void show_elite() {
   } else {
     info_label(s, "(could not load)", COL_AMBER);
   }
-  load_screen(s);
+  show_sub(s);
 }
 
 /* ── OPEN POSITIONS ──────────────────────────────────────────────────────── */
@@ -555,9 +611,9 @@ static void show_positions() {
   current_page = PAGE_POSITIONS;
   lv_obj_t *s = new_page("Open Positions", true);
   JsonDocument doc;
-  if (!httpGetJson("/api/esp32/positions", doc)) { info_label(s, "could not load", COL_AMBER); load_screen(s); return; }
+  if (!httpGetJson("/api/esp32/positions", doc)) { info_label(s, "could not load", COL_AMBER); show_sub(s); return; }
   JsonArray ps = doc["positions"].as<JsonArray>();
-  if (ps.size() == 0) { info_label(s, "No open positions", COL_MUTED); load_screen(s); return; }
+  if (ps.size() == 0) { info_label(s, "No open positions", COL_MUTED); show_sub(s); return; }
   for (JsonObject p : ps) {
     const char *sym = p["s"] | "?";
     bool sh = strcmp((const char *)(p["d"] | "L"), "S") == 0;
@@ -570,7 +626,7 @@ static void show_positions() {
     char det[64]; snprintf(det, sizeof(det), "size %.4g  @ %.2f  [%s]", sz, e, src);
     info_label(c, det, COL_MUTED);
   }
-  load_screen(s);
+  show_sub(s);
 }
 
 /* ── TRADE HISTORY ───────────────────────────────────────────────────────── */
@@ -578,9 +634,9 @@ static void show_history() {
   current_page = PAGE_HISTORY;
   lv_obj_t *s = new_page("Trade History", true);
   JsonDocument doc;
-  if (!httpGetJson("/api/esp32/history?n=30", doc)) { info_label(s, "could not load", COL_AMBER); load_screen(s); return; }
+  if (!httpGetJson("/api/esp32/history?n=30", doc)) { info_label(s, "could not load", COL_AMBER); show_sub(s); return; }
   JsonArray ts_ = doc["trades"].as<JsonArray>();
-  if (ts_.size() == 0) { info_label(s, "No closed trades yet", COL_MUTED); load_screen(s); return; }
+  if (ts_.size() == 0) { info_label(s, "No closed trades yet", COL_MUTED); show_sub(s); return; }
   lv_obj_t *c = card(s);
   for (JsonObject t : ts_) {
     const char *when = t["t"] | "";
@@ -591,7 +647,7 @@ static void show_history() {
     lv_obj_t *v = kv_row(c, lbl);
     kv_set_pnl(v, pnl);
   }
-  load_screen(s);
+  show_sub(s);
 }
 
 /* ── EARN ────────────────────────────────────────────────────────────────── */
@@ -599,7 +655,7 @@ static void show_earn() {
   current_page = PAGE_EARN;
   lv_obj_t *s = new_page("Earn", true);
   JsonDocument doc;
-  if (!httpGetJson("/api/earn", doc)) { info_label(s, "could not load", COL_AMBER); load_screen(s); return; }
+  if (!httpGetJson("/api/earn", doc)) { info_label(s, "could not load", COL_AMBER); show_sub(s); return; }
   lv_obj_t *c = card(s);
   kv_set_usd(kv_row(c, "Total balance"), doc["total"] | 0.0);
   if (!doc["interest_24h"].isNull())
@@ -616,7 +672,7 @@ static void show_earn() {
       kv_set_usd(kv_row(ic, coin), it["amount"] | 0.0);
     }
   }
-  load_screen(s);
+  show_sub(s);
 }
 
 static void navigate(int page) {
@@ -656,10 +712,16 @@ void setup() {
 
   tft.begin();
   tft.setRotation(0);
+  tft.initDMA();                 // enable SPI DMA used by disp_flush()
   tft.fillScreen(TFT_BLACK);
 
+  // Skip TLS cert validation (LAN-ish dashboard) and shrink the TLS buffers to
+  // cut peak heap; the client persists so the connection is reused per fetch.
+  s_client.setInsecure();
+  s_client.setBufferSizes(4096, 1024);
+
   lv_init();
-  lv_disp_draw_buf_init(&draw_buf, buf1, NULL, SCR_W * 10);
+  lv_disp_draw_buf_init(&draw_buf, buf1, buf2, SCR_W * 40);
   static lv_disp_drv_t disp_drv;
   lv_disp_drv_init(&disp_drv);
   disp_drv.hor_res = SCR_W; disp_drv.ver_res = SCR_H;
