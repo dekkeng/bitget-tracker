@@ -14,6 +14,13 @@ POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SEC", "30"))
 COOKIES_FILE = Path(os.environ.get("COOKIES_PATH", "cookies.json"))
 TRADERS_FILE = Path(os.environ.get("TRADERS_PATH", "traders.json"))
 
+# In-server silent cookie renewal: every COOKIE_REFRESH_SEC (default 6h) the
+# poller revisits Bitget with the live session so Bitget re-issues a fresh
+# bt_newsessionid, then persists it to cookies.json — same trick the GitHub
+# Actions refresher uses, but done in-process with the already-open browser.
+COOKIE_REFRESH_SEC = int(os.environ.get("COOKIE_REFRESH_SEC", str(6 * 3600)))
+_last_cookie_refresh = 0.0   # timestamp of last successful in-server refresh
+
 CHROMIUM_ARGS = [
     "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
     "--disable-gpu", "--single-process", "--no-zygote",
@@ -44,6 +51,8 @@ _status = {
     "auth_ok": None,   # None=unknown, True=working, False=cookie expired/CF blocked
     "last_pos_response": None,
     "last_hist_response": None,
+    "cookie_refreshed_at": None,   # last in-server silent cookie renewal
+    "cookie_expiry": None,         # bt_newsessionid expiry after last renewal
 }
 
 
@@ -131,6 +140,61 @@ def _parse_cookie_string(cookie_str: str) -> list[dict]:
             continue
         cookies.append({"name": name, "value": value, "domain": ".bitget.com", "path": "/"})
     return cookies
+
+
+async def _maybe_refresh_cookie(page, context) -> None:
+    """Silent in-server cookie renewal (no GitHub Action needed).
+
+    At most once every COOKIE_REFRESH_SEC, and only while auth is currently
+    healthy, revisit the Bitget root so the server re-issues a fresh
+    bt_newsessionid, read the cookies back from the live browser context, and
+    persist them to cookies.json. If the session is dead this does nothing
+    (auth_ok would already be False) — a full re-login still needs a human.
+    """
+    global _last_cookie_refresh
+    now = datetime.now().timestamp()
+    if _status.get("auth_ok") is not True:
+        return
+    if now - _last_cookie_refresh < COOKIE_REFRESH_SEC:
+        return
+
+    try:
+        await page.goto(BITGET_BASE, wait_until="domcontentloaded", timeout=30_000)
+        cks = await context.cookies()
+    except Exception as e:
+        logger.info("cookie self-refresh: nav/read failed: %s", e)
+        return
+
+    parts, sess_exp = [], None
+    for c in cks:
+        if "bitget" not in (c.get("domain") or ""):
+            continue
+        parts.append(f'{c["name"]}={c["value"]}')
+        if c["name"] == "bt_newsessionid":
+            sess_exp = c.get("expires")
+    if not any(p.startswith("bt_newsessionid=") for p in parts):
+        logger.info("cookie self-refresh: no bt_newsessionid in context — skipped")
+        return
+
+    new_str = "; ".join(parts)
+    _last_cookie_refresh = now
+    if new_str == _load_cookie_string():
+        logger.info("cookie self-refresh: session not rotated this round (unchanged)")
+        return
+
+    try:
+        COOKIES_FILE.write_text(json.dumps({
+            "cookie": new_str,
+            "updated": datetime.now(BKK).isoformat(),
+        }))
+        exp = (datetime.fromtimestamp(sess_exp, BKK).strftime("%Y-%m-%d %H:%M")
+               if sess_exp and sess_exp > 0 else "session")
+        _status["cookie_refreshed_at"] = datetime.now(BKK).strftime("%Y-%m-%d %H:%M")
+        _status["cookie_expiry"] = exp
+        logger.info("cookie self-refresh: persisted renewed cookie (%d chars, exp=%s)",
+                    len(new_str), exp)
+    except OSError as e:
+        logger.info("cookie self-refresh: write failed: %s", e)
 
 
 async def start_poller(push_fn: Callable):
@@ -230,6 +294,9 @@ async def _poll_once(push_fn: Callable, cookie_str: str,
 
             await _active_poll(page, push_fn, traders, trader_types)
             await _fetch_balance(page, push_fn, traders, trader_types)
+
+            # In-server silent cookie renewal (throttled, only when auth healthy).
+            await _maybe_refresh_cookie(page, context)
 
             logger.info("Poll cycle complete — closing browser")
         finally:
