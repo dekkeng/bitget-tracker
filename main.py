@@ -117,6 +117,31 @@ def _trader_type(name: str) -> str:
 
 _DEFAULT_TRADER = _traders_list[0]["name"] if _traders_list else "DKTrading"
 
+
+def _ensure_trader(name: str, data=None) -> None:
+    """Auto-register a trader the first time alert pushes data for it, so the
+    tracker needs no TRADERS env — it learns traders from the pushes themselves.
+    (traders.json persistence is best-effort; on Railway's ephemeral FS the next
+    push simply re-registers after a restart.)"""
+    global _traders_list, _DEFAULT_TRADER
+    pid = ""
+    if isinstance(data, dict):
+        pid = str(data.get("portfolioId") or data.get("id") or "")
+    existing = next((t for t in _traders_list if t["name"] == name), None)
+    if existing:
+        if pid and not existing.get("id"):
+            existing["id"] = pid
+            _save_traders_list(_traders_list)
+        return
+    # Drop the placeholder default entry once a real trader arrives
+    _traders_list = [t for t in _traders_list
+                     if t.get("name") != "TraderName" and t.get("id") != "YOUR_PORTFOLIO_ID"]
+    _traders_list.append({"name": name, "id": pid, "type": "cfd"})
+    _save_traders_list(_traders_list)
+    if not _DEFAULT_TRADER or _DEFAULT_TRADER == "TraderName":
+        _DEFAULT_TRADER = name
+    logger.info("Auto-registered trader from push: name=%s id=%s", name, pid)
+
 _BALANCE_PATS = ("balance", "equity", "totalbal", "totalequity",
                  "totalasset", "accountval", "worth", "asset")
 
@@ -495,6 +520,8 @@ def _rebuild_elite() -> None:
 
 def _push_data(kind: str, data, trader: str = None):
     global _settings
+    if trader:
+        _ensure_trader(trader, data)
     if trader is None:
         trader = _DEFAULT_TRADER
 
@@ -805,6 +832,21 @@ def _push_data(kind: str, data, trader: str = None):
                 _save_settings(_settings)
                 logger.info("Auto-updated investment[%s]=%.2f from fund_flow (%d rows)",
                             trader, inv, len(rows))
+    elif kind == "investment":
+        # Net deposits/withdrawals, fetched by alert via official REST (pure-receiver mode)
+        if isinstance(data, dict):
+            _investment["data"] = data
+            _investment["fetched_at"] = datetime.now(BKK).isoformat()
+            _investment["error"] = data.get("error")
+            if data.get("net", 0) > 0:
+                _settings["investment"] = data["net"]
+                _save_settings(_settings)
+    elif kind == "earn":
+        # Bitget Earn balance + interest, fetched by alert via official REST
+        if isinstance(data, dict):
+            _earn["data"] = data
+            _earn["fetched_at"] = datetime.now(BKK).isoformat()
+            _earn["error"] = data.get("error")
     elif kind == "balance":
         _mt5["balance_raw"] = data
     elif kind == "balance_sniff":
@@ -1066,13 +1108,14 @@ async def lifespan(app: FastAPI):
         })):
             logger.info("Restored cookie from BITGET_COOKIE env var (%d chars)", len(env_cookie))
 
-    tasks = [
-        asyncio.create_task(_investment_poller()),
-        asyncio.create_task(_earn_poller()),
-    ]
+    tasks = []
     if os.environ.get("DISABLE_POLLER"):
-        logger.info("Browser poller disabled (DISABLE_POLLER is set) — expecting push from bitget-alert")
+        # Pure-receiver mode: fetch nothing here. bitget-alert pushes everything
+        # (positions, history, copy_details, cancelled, elite, investment, earn).
+        logger.info("Poller disabled (DISABLE_POLLER) — pure receiver, all data pushed from bitget-alert")
     else:
+        tasks.append(asyncio.create_task(_investment_poller()))
+        tasks.append(asyncio.create_task(_earn_poller()))
         from browser_poller import start_poller
         tasks.append(asyncio.create_task(start_poller(_push_data)))
     yield
