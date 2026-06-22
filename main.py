@@ -762,9 +762,13 @@ def _push_data(kind: str, data, trader: str = None):
         daily       = _fv("dailyProfit", "todayProfit", "dailyPnl",
                           "dayProfit", "profit24h", src=row)
         aum         = _fv("aum", "totalAum", "aumAmount", src=row)
-        ps_earned   = _fv("waitShareProfit", "totalProfitShare", "profitShareIncome",
-                          "sharedProfit", "settledProfitShare", "earnedProfitShare",
-                          src=row)
+        # waitShareProfit = profit share accruing TODAY (released ~23:00 Thai).
+        ps_today    = _fv("waitShareProfit", "waitReleaseAmount", src=row)
+        # Cumulative total earned is NOT in the overview payload — only set it if a
+        # real cumulative field shows up; otherwise keep whatever we already have.
+        ps_total    = _fv("totalProfitShare", "settledProfitShare", "profitShareIncome",
+                          "cumulativeProfitShare", "totalShareProfit", "earnedProfitShare",
+                          src=row, default=-1.0)
         copiers_pnl = _fv("followProfit", "copiersPnl", "copierPnl", "followerPnl", src=row)
         roi         = _fv("roi", "roiRate", "returnRate", src=row, default=-99999.0)
         bal_bitget  = _fv("totalEquity", "estimatedAssets", "balance", "equity",
@@ -781,7 +785,10 @@ def _push_data(kind: str, data, trader: str = None):
         d["daily_pnl"]           = round(daily, 4)   # overridden by _rebuild_elite if MT5 history present
         d["aum"]                 = round(aum, 2)
         d["follower_count"]      = followers
-        d["profit_share_earned"] = round(ps_earned, 2)
+        d["profit_share_today"] = round(ps_today, 2)
+        if ps_total >= 0:
+            d["profit_share_earned"] = round(ps_total, 2)
+        d.setdefault("profit_share_earned", 0.0)
         d["copiers_pnl"]         = round(copiers_pnl, 2)
         if roi != -99999.0:
             d["roi"] = round(roi * 100 if -1 <= roi <= 1 else roi, 2)
@@ -794,8 +801,8 @@ def _push_data(kind: str, data, trader: str = None):
         _elite["fetched_at"] = datetime.now(BKK).isoformat()
         _elite["error"] = None
         _rebuild_elite()
-        logger.info("Elite meta (Bitget): all_time=%.2f followers=%d ps_earned=%.2f aum=%.2f",
-                    all_time, followers, ps_earned, aum)
+        logger.info("Elite meta (Bitget): all_time=%.2f followers=%d ps_today=%.2f aum=%.2f",
+                    all_time, followers, ps_today, aum)
     elif kind == "elite_account":
         # MT5 account: the real execution account — owns balance + floating PnL.
         # all-time / profit-share / followers come from Bitget (kind="elite_trader").
@@ -1442,6 +1449,7 @@ async def get_esp32():
         "aum":  round(elite_d.get("aum", 0.0), 2),
         "fans": int(elite_d.get("follower_count", 0)),
         "ps":   round(elite_d.get("profit_share_earned", 0.0), 2),
+        "pst":  round(elite_d.get("profit_share_today", 0.0), 2),
         "cp":   round(elite_d.get("copiers_pnl", 0.0), 2),
         "roi":  elite_d.get("roi"),
     }

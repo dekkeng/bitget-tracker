@@ -403,6 +403,46 @@ static void info_label(lv_obj_t *parent, const char *text, lv_color_t col) {
   lv_obj_set_style_text_color(l, col, 0);
 }
 
+// One readable list item (its own card): big symbol + coloured side on top, the
+// value (PnL) on the right, and a muted detail line underneath. Used for the
+// open-positions and trade-history lists so rows are clearly separated, not crammed.
+static void list_row(lv_obj_t *parent, const char *symbol, bool short_side,
+                     const char *detail, double value) {
+  lv_obj_t *c = card(parent);
+  // Top row: symbol (left) + value (right, coloured by sign)
+  lv_obj_t *top = lv_obj_create(c);
+  lv_obj_set_width(top, LV_PCT(100));
+  lv_obj_set_height(top, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(top, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(top, 0, 0);
+  lv_obj_set_style_pad_all(top, 0, 0);
+  lv_obj_clear_flag(top, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(top, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+  lv_obj_t *sym = lv_label_create(top);
+  lv_label_set_text(sym, symbol);
+  lv_obj_set_style_text_color(sym, COL_TEXT, 0);
+  lv_obj_set_style_text_font(sym, &lv_font_montserrat_16, 0);
+
+  lv_obj_t *val = lv_label_create(top);
+  char vb[40]; fmtPnL(vb, sizeof(vb), value);
+  lv_label_set_text(val, vb);
+  lv_obj_set_style_text_color(val, pnlColor(value), 0);
+  lv_obj_set_style_text_font(val, &lv_font_montserrat_16, 0);
+
+  // Detail line: coloured side word + muted time / size@price
+  lv_obj_t *d = lv_label_create(c);
+  lv_label_set_recolor(d, true);
+  lv_obj_set_style_text_color(d, COL_MUTED, 0);
+  lv_obj_set_style_text_font(d, &lv_font_montserrat_12, 0);
+  char sub[80];
+  snprintf(sub, sizeof(sub), "#%s %s#  ·  %s",
+           short_side ? "ff4d4d" : "00c47a", short_side ? "SHORT" : "LONG",
+           detail ? detail : "");
+  lv_label_set_text(d, sub);
+}
+
 /* ── Navigation ──────────────────────────────────────────────────────────── */
 static void nav_event(lv_event_t *e) {
   pending_nav = (int)(intptr_t)lv_event_get_user_data(e);
@@ -800,14 +840,11 @@ static void show_trader_history() {
   if (!httpGetJson(path, doc)) { info_label(s, "could not load", COL_AMBER); show_sub(s); return; }
   JsonArray ts_ = doc["trades"].as<JsonArray>();
   if (ts_.size() == 0) { info_label(s, "No closed trades yet", COL_MUTED); show_sub(s); return; }
-  lv_obj_t *c = card(s);
   for (JsonObject t : ts_) {
     const char *when = t["t"] | "";
     const char *sym = t["s"] | "?";
     bool sh = strcmp((const char *)(t["d"] | "L"), "S") == 0;
-    double pnl = t["p"] | 0.0;
-    char lbl[48]; snprintf(lbl, sizeof(lbl), "%s %s %s", when, sym, sh ? "S" : "L");
-    kv_set_pnl(kv_row(c, lbl), pnl);
+    list_row(s, sym, sh, when, t["p"] | 0.0);
   }
   show_sub(s);
 }
@@ -834,11 +871,8 @@ static void show_trader_positions() {
     const char *sym = p["s"] | "?";
     bool sh = strcmp((const char *)(p["d"] | "L"), "S") == 0;
     double sz = p["sz"] | 0.0, e = p["e"] | 0.0, u = p["u"] | 0.0;
-    lv_obj_t *c = card(s);
-    char hdr[48]; snprintf(hdr, sizeof(hdr), "%s  %s", sym, sh ? "SHORT" : "LONG");
-    kv_set_pnl(kv_row(c, hdr), u);
-    char det[48]; snprintf(det, sizeof(det), "size %.4g  @ %.2f", sz, e);
-    info_label(c, det, COL_MUTED);
+    char det[48]; snprintf(det, sizeof(det), "%.4g @ %.2f", sz, e);
+    list_row(s, sym, sh, det, u);
   }
   show_sub(s);
 }
@@ -861,7 +895,9 @@ static void show_elite() {
   if (!el["roi"].isNull()) kv_pct(kv_row(c, "ROI"), el["roi"] | 0.0);
 
   lv_obj_t *ci = card(s);
-  kv_set_usd(kv_row(ci, "Profit shared (earned)"), el["ps"] | 0.0);
+  kv_set_usd(kv_row(ci, "Profit share (today)"), el["pst"] | 0.0);
+  if ((double)(el["ps"] | 0.0) > 0.005)
+    kv_set_usd(kv_row(ci, "Profit share (total)"), el["ps"] | 0.0);
   kv_set_pnl(kv_row(ci, "Copiers P&L"), el["cp"] | 0.0);
   kv_set_usd(kv_row(ci, "AUM"), el["aum"] | 0.0);
   char b[16];
@@ -876,12 +912,11 @@ static void show_elite() {
     JsonArray ps = ed["positions"].as<JsonArray>();
     if (ps.size() == 0) info_label(s, "none", COL_MUTED);
     for (JsonObject p : ps) {
-      lv_obj_t *pc = card(s);
       const char *sym = p["symbol"] | "?";
-      const char *side = (strcmp((const char *)(p["side"] | ""), "short") == 0) ? "SHORT" : "LONG";
-      char hdr[40]; snprintf(hdr, sizeof(hdr), "%s  %s", sym, side);
-      lv_obj_t *v = kv_row(pc, hdr);
-      kv_set_pnl(v, p["unrealized_pnl"] | 0.0);
+      bool sh = strcmp((const char *)(p["side"] | ""), "short") == 0;
+      double sz = p["size"] | 0.0, e = p["entry_price"] | 0.0;
+      char det[48]; snprintf(det, sizeof(det), "%.4g @ %.2f", sz, e);
+      list_row(s, sym, sh, det, p["unrealized_pnl"] | 0.0);
     }
   } else {
     info_label(s, "(could not load)", COL_AMBER);
@@ -902,12 +937,10 @@ static void show_positions() {
     bool sh = strcmp((const char *)(p["d"] | "L"), "S") == 0;
     double sz = p["sz"] | 0.0, e = p["e"] | 0.0, u = p["u"] | 0.0;
     const char *src = p["src"] | "";
-    lv_obj_t *c = card(s);
-    char hdr[48]; snprintf(hdr, sizeof(hdr), "%s  %s", sym, sh ? "SHORT" : "LONG");
-    lv_obj_t *top = kv_row(c, hdr);
-    kv_set_pnl(top, u);
-    char det[64]; snprintf(det, sizeof(det), "size %.4g  @ %.2f  [%s]", sz, e, src);
-    info_label(c, det, COL_MUTED);
+    char det[64];
+    if (src[0]) snprintf(det, sizeof(det), "%.4g @ %.2f  ·  %s", sz, e, src);
+    else        snprintf(det, sizeof(det), "%.4g @ %.2f", sz, e);
+    list_row(s, sym, sh, det, u);
   }
   show_sub(s);
 }
@@ -920,14 +953,11 @@ static void show_history() {
   if (!httpGetJson("/api/esp32/history?n=20", doc)) { info_label(s, "could not load", COL_AMBER); show_sub(s); return; }
   JsonArray ts_ = doc["trades"].as<JsonArray>();
   if (ts_.size() == 0) { info_label(s, "No closed trades yet", COL_MUTED); show_sub(s); return; }
-  lv_obj_t *c = card(s);
   for (JsonObject t : ts_) {
     const char *when = t["t"] | "";
     const char *sym = t["s"] | "?";
     bool sh = strcmp((const char *)(t["d"] | "L"), "S") == 0;
-    double pnl = t["p"] | 0.0;
-    char lbl[48]; snprintf(lbl, sizeof(lbl), "%s %s %s", when, sym, sh ? "S" : "L");
-    kv_set_pnl(kv_row(c, lbl), pnl);
+    list_row(s, sym, sh, when, t["p"] | 0.0);
   }
   show_sub(s);
 }
