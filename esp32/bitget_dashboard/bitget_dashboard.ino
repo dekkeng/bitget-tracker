@@ -97,7 +97,8 @@ static lv_obj_t *hl_today, *hl_total, *hl_open, *hl_pos, *hl_all, *hl_earn, *hl_
 static lv_obj_t *hl_today_sub;                  // "N trades today" under TODAY P&L
 static lv_obj_t *hl_earn_day;                  // today's earn interest box
 static lv_obj_t *hl_dot;                       // API/cookie status dot on the footer
-static bool g_fetch_ok = false;                // did the last /api/esp32 GET succeed?
+static bool g_fetch_ok = false;                // is the backend reachable? (red dot when false)
+static int  g_fail_count = 0;                  // consecutive failed fetches — tolerate blips
 
 /* ── On-device config (saved to NVS, survives power-off until changed) ─────── */
 static Preferences prefs;
@@ -1256,8 +1257,11 @@ void loop() {
     last_fetch = now;
     if (current_page == PAGE_HOME) {        // don't reconnect/fetch while in Config
       if (WiFi.status() != WL_CONNECTED) wifi_connect();
-      g_fetch_ok = httpGet("/api/esp32", lastPayload);
-      if (home_screen) update_home();       // refresh labels + status dot (red on failure)
+      bool ok = httpGet("/api/esp32", lastPayload);
+      if (!ok) { delay(400); ok = httpGet("/api/esp32", lastPayload); }   // retry once — ride out blips
+      if (ok) { g_fetch_ok = true; g_fail_count = 0; }
+      else if (++g_fail_count >= 2) { g_fetch_ok = false; }               // red only after 2 in a row
+      if (home_screen) update_home();       // refresh labels + status dot
     }
   }
 }
