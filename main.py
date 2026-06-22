@@ -354,6 +354,18 @@ def _parse_positions(raw: Any) -> list[dict]:
     return out
 
 
+def _all_positions() -> list[dict]:
+    """Merge parsed open positions across all (non-cancelled) copy traders.
+    Positions are stored per-trader (tc['positions_raw']); this is the global view."""
+    cancelled = set(_settings.get("cancelled_trader_names") or [])
+    out = []
+    for name in _trader_names():
+        if name in cancelled:
+            continue
+        out.extend(_parse_positions(_tc(name).get("positions_raw")))
+    return out
+
+
 def _parse_trades(raw: Any) -> list[dict]:
     out = []
     for h in _extract_history_rows(raw):
@@ -529,8 +541,9 @@ def _push_data(kind: str, data, trader: str = None):
     ts = _ts(trader)
 
     if kind == "positions":
-        # Positions are global (can't split by trader yet)
-        _mt5["positions_raw"] = data
+        # Per-trader open positions (alert pushes one payload per trader).
+        tc["positions_raw"] = data
+        _mt5["positions_raw"] = data  # kept for legacy single-trader callers
         _mt5["pushed_at"] = datetime.now(BKK).strftime("%H:%M")
         tc["pushed_at"] = _mt5["pushed_at"]
     elif kind == "history":
@@ -908,7 +921,18 @@ def _rebuild_trader_summary(name: str) -> dict:
 
     scraped_balance = ts.get("balance", 0.0)
     investment      = ts.get("investment", 0.0)
-    open_pnl        = ts.get("open_pnl", 0.0)
+
+    # Open PnL + count: prefer this trader's own positions (per-trader positions_raw);
+    # fall back to the copy_details summary fields when no positions pushed yet.
+    positions = _parse_positions(tc.get("positions_raw"))
+    if positions:
+        open_pnl = round(sum(p["unrealized_pnl"] for p in positions), 4)
+        open_pos_count = len(positions)
+    else:
+        open_pnl = ts.get("open_pnl", 0.0)
+        open_pos_count = ts.get("open_position_count", 0)
+        if open_pos_count == 0 and open_pnl != 0:
+            open_pos_count = 1  # we know there's at least one
 
     # For futures traders Bitget doesn't expose a direct balance field,
     # so compute it as: investment + all-time PnL + open (unrealized) PnL.
@@ -916,11 +940,6 @@ def _rebuild_trader_summary(name: str) -> dict:
         balance = round(investment + all_time_pnl + open_pnl, 2)
     else:
         balance = scraped_balance
-
-    # Open position count: prefer explicit API field; fall back to 1 if PnL is non-zero
-    open_pos_count = ts.get("open_position_count", 0)
-    if open_pos_count == 0 and open_pnl != 0:
-        open_pos_count = 1  # we know there's at least one
 
     # Share ratio normalised to a percentage (Bitget sends 0.1 → 10%, or 10 → 10%)
     sr_raw = ts.get("share_ratio")
@@ -988,11 +1007,13 @@ def _rebuild_summary() -> None:
         total_open_pnl += s["open_positions_pnl"]
         total_open_count += s.get("open_position_count", 0)
 
-    # Open positions from the global probe; fall back to per-trader portfolio counts
-    all_positions = _parse_positions(_mt5["positions_raw"])
-    if all_positions:
-        total_open_pnl = sum(p["unrealized_pnl"] for p in all_positions)
-        total_open_count = len(all_positions)
+    # Open PnL/count are already summed per-trader above (from each trader's
+    # own positions_raw). Count today's closed trades for the TODAY P&L subtitle.
+    today_start_ms, today_end_ms = _bkk_today_range_ms()
+    trades_today = sum(1 for t in all_trades
+                       if today_start_ms <= t.get("close_time_ms", 0) < today_end_ms)
+    trades_today += sum(1 for t in (_elite.get("trades") or [])
+                        if today_start_ms <= t.get("close_time_ms", 0) < today_end_ms)
 
     # Elite (lead) portfolio is tracked like a trader: fold its open positions,
     # open PnL and daily PnL into the grand totals so the dashboard reflects it.
@@ -1021,6 +1042,7 @@ def _rebuild_summary() -> None:
         "daily_pnl": round(total_daily_pnl, 4),
         "open_positions": total_open_count,
         "open_positions_pnl": round(total_open_pnl, 4),
+        "trades_today": trades_today,
         "all_time_pnl": round(total_all_time_pnl + cancelled_copy_pnl + elite_all_time_pnl + earn_all_pnl, 4),
         "active_trader_pnl": round(total_all_time_pnl, 4),
         "cancelled_copy_pnl": cancelled_copy_pnl,
@@ -1175,7 +1197,7 @@ async def get_mt5_traders():
 
 @app.get("/api/mt5/positions")
 async def get_mt5_positions():
-    return _parse_positions(_mt5["positions_raw"])
+    return _all_positions()
 
 
 @app.get("/api/mt5/positions/raw")
@@ -1236,7 +1258,7 @@ async def get_prices():
     The dashboard uses these to recompute unrealized PnL between scraper
     polls — and while the cookie is expired, since this needs no auth.
     """
-    positions = _parse_positions(_mt5["positions_raw"])
+    positions = _all_positions()
     symbols = sorted({(p.get("symbol") or "").upper() for p in positions} - {""})
     if not symbols:
         symbols = ["XAUUSD"]  # only instrument traded so far
@@ -1431,7 +1453,7 @@ async def get_esp32():
             "upd": datetime.now(BKK).strftime("%H:%M"),
             "bal": round(_settings.get("balance", 0.0) + earn_total + elite_total, 2),
             "inv": round(_settings.get("investment", 0.0), 2),
-            "day": 0.0, "open": 0.0, "npos": 0, "all": 0.0,
+            "day": 0.0, "open": 0.0, "npos": 0, "ntoday": 0, "all": 0.0,
             "earn": earn_total, "eday": earn_day,
             "traders": [], "elite": elite,
         }
@@ -1477,6 +1499,7 @@ async def get_esp32():
         "day":  round(s["daily_pnl"], 2),
         "open": round(s["open_positions_pnl"], 2),
         "npos": int(s["open_positions"]),
+        "ntoday": int(s.get("trades_today", 0)),
         "all":  round(s["all_time_pnl"], 2),
         "earn": earn_total,
         "eday": earn_day,
@@ -1486,31 +1509,48 @@ async def get_esp32():
 
 
 @app.get("/api/esp32/positions")
-async def get_esp32_positions():
-    """Compact open-position rows for the ESP32 detail page — copy-trading
-    (global) positions plus the elite portfolio's, with a short source tag."""
+async def get_esp32_positions(trader: str = None):
+    """Compact open-position rows for the ESP32. With ?trader=NAME → only that
+    trader's open positions; otherwise all copy traders + the elite portfolio,
+    each tagged with a short source name."""
     out = []
-    for p in _parse_positions(_mt5["positions_raw"]):
-        out.append({
-            "s": p["symbol"], "d": "S" if p["side"] == "short" else "L",
-            "sz": p["size"], "e": p["entry_price"],
-            "u": round(p["unrealized_pnl"], 2), "src": "copy",
-        })
-    for p in (_elite.get("positions") or []):
-        out.append({
-            "s": p["symbol"], "d": "S" if p["side"] == "short" else "L",
-            "sz": p["size"], "e": p["entry_price"],
-            "u": round(p["unrealized_pnl"], 2), "src": "elite",
-        })
+    cancelled = set(_settings.get("cancelled_trader_names") or [])
+    if trader and trader in _trader_names():
+        names = [trader]
+        include_elite = False
+    else:
+        names = [n for n in _trader_names() if n not in cancelled]
+        include_elite = True
+    for name in names:
+        for p in _parse_positions(_tc(name).get("positions_raw")):
+            out.append({
+                "s": p["symbol"], "d": "S" if p["side"] == "short" else "L",
+                "sz": p["size"], "e": p["entry_price"],
+                "u": round(p["unrealized_pnl"], 2), "src": name[:8],
+            })
+    if include_elite:
+        for p in (_elite.get("positions") or []):
+            out.append({
+                "s": p["symbol"], "d": "S" if p["side"] == "short" else "L",
+                "sz": p["size"], "e": p["entry_price"],
+                "u": round(p["unrealized_pnl"], 2), "src": "elite",
+            })
     return {"positions": out}
 
 
 @app.get("/api/esp32/history")
-async def get_esp32_history(n: int = 30):
-    """Compact recent closed-trade rows for the ESP32 detail page — merged across
-    all traders and the elite portfolio, newest first, capped at n (max 100)."""
+async def get_esp32_history(n: int = 30, trader: str = None):
+    """Compact recent closed-trade rows for the ESP32 detail page, newest first,
+    capped at n (max 100). With ?trader=NAME, returns only that trader's trades;
+    otherwise merges all traders + the elite portfolio."""
     n = max(1, min(n, 100))
-    trades = list(_mt5["trades"] or []) + list(_elite.get("trades") or [])
+    if trader and trader in _trader_names():
+        tc = _tc(trader)
+        if tc["summary"] is None:
+            _rebuild_trader_summary(trader)
+        trades = list(tc.get("trades") or [])
+    else:
+        trades = list(_mt5["trades"] or []) + list(_elite.get("trades") or [])
     trades.sort(key=lambda t: t.get("close_time_ms", 0), reverse=True)
     out = []
     for t in trades[:n]:

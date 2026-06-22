@@ -70,17 +70,31 @@ static uint16_t SCR_H = 240;
 
 /* ── Pages ───────────────────────────────────────────────────────────────── */
 enum Page { PAGE_HOME = 0, PAGE_MENU, PAGE_TRADERS, PAGE_ELITE, PAGE_POSITIONS,
-            PAGE_HISTORY, PAGE_EARN, PAGE_TRADER_DETAIL,
+            PAGE_HISTORY, PAGE_EARN, PAGE_TRADER_DETAIL, PAGE_TRADER_HISTORY,
+            PAGE_TRADER_POSITIONS,
             PAGE_CONFIG, PAGE_CFG_WIFI, PAGE_CFG_PASS, PAGE_CFG_URL };
+#define PAGE_BACK 200                // sentinel: pop the nav stack (go back one step)
 static int  current_page = PAGE_HOME;
 static int  pending_nav  = -1;       // set by a button, handled in loop()
 static int  trader_detail_idx = 0;   // which trader to open on PAGE_TRADER_DETAIL
+
+// Back stack: forward navigation pushes the page being left, so Back returns one
+// step at a time instead of jumping straight home.
+static int  nav_stack[12];
+static int  nav_depth = 0;
+static void nav_push(int page) {
+  if (nav_depth > 0 && nav_stack[nav_depth - 1] == page) return;  // de-dup
+  if (nav_depth < 12) nav_stack[nav_depth++] = page;
+  else { for (int i = 1; i < 12; i++) nav_stack[i - 1] = nav_stack[i]; nav_stack[11] = page; }
+}
+static int nav_pop() { return nav_depth > 0 ? nav_stack[--nav_depth] : PAGE_HOME; }
 static String lastPayload;           // cached /api/esp32 JSON
 
 // Home is built ONCE and kept alive; refreshes only update these label texts
 // (no teardown/rebuild → no heap churn, no full-screen flicker every 30s).
 static lv_obj_t *home_screen = NULL;
 static lv_obj_t *hl_today, *hl_total, *hl_open, *hl_pos, *hl_all, *hl_earn, *hl_footer;
+static lv_obj_t *hl_today_sub;                  // "N trades today" under TODAY P&L
 static lv_obj_t *hl_earn_day;                  // today's earn interest box
 static lv_obj_t *hl_dot;                       // API/cookie status dot on the footer
 static bool g_fetch_ok = false;                // did the last /api/esp32 GET succeed?
@@ -160,7 +174,7 @@ static void make_touch_dot() {
   g_touch_dot = lv_obj_create(lv_layer_top());
   lv_obj_set_size(g_touch_dot, 26, 26);
   lv_obj_set_style_radius(g_touch_dot, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_color(g_touch_dot, COL_ACCENT, 0);
+  lv_obj_set_style_bg_color(g_touch_dot, COL_TEXT, 0);   // white touch feedback
   lv_obj_set_style_bg_opa(g_touch_dot, LV_OPA_50, 0);
   lv_obj_set_style_border_color(g_touch_dot, COL_TEXT, 0);
   lv_obj_set_style_border_width(g_touch_dot, 2, 0);
@@ -258,8 +272,13 @@ static bool httpGetJson(const String &path, JsonDocument &doc) {
   if (!ok) return false;
   int code = http.GET();
   if (code != 200) { http.end(); return false; }
-  DeserializationError err = deserializeJson(doc, http.getStream());
+  // Read the full body first (HTTPClient de-chunks it) then parse. Parsing
+  // straight from getStream() fails on chunked responses once they span
+  // multiple packets (e.g. the 30-row history list).
+  String body = http.getString();
   http.end();
+  DeserializationError err = deserializeJson(doc, body);
+  if (err) Serial.printf("[json] %s parse: %s\n", path.c_str(), err.c_str());
   return !err;
 }
 static String urlenc(const char *s) {
@@ -388,6 +407,7 @@ static void info_label(lv_obj_t *parent, const char *text, lv_color_t col) {
 static void nav_event(lv_event_t *e) {
   pending_nav = (int)(intptr_t)lv_event_get_user_data(e);
 }
+static void back_event(lv_event_t *e) { pending_nav = PAGE_BACK; }
 static void trader_event(lv_event_t *e) {
   trader_detail_idx = (int)(intptr_t)lv_event_get_user_data(e);
   pending_nav = PAGE_TRADER_DETAIL;
@@ -429,7 +449,7 @@ static lv_obj_t *new_page(const char *title, bool back) {
       lv_obj_set_height(b, 38);
       lv_obj_set_style_pad_hor(b, 14, 0);
       lv_obj_set_style_radius(b, 9, 0);
-      lv_obj_add_event_cb(b, nav_event, LV_EVENT_CLICKED, (void *)(intptr_t)PAGE_HOME);
+      lv_obj_add_event_cb(b, back_event, LV_EVENT_CLICKED, NULL);   // one step back
       lv_obj_t *bl = lv_label_create(b);
       lv_label_set_text(bl, LV_SYMBOL_LEFT "  Back");
       lv_obj_set_style_text_color(bl, COL_TEXT, 0);
@@ -525,6 +545,14 @@ static lv_obj_t *status_dot(lv_obj_t *parent) {
 // Each figure gets its own box. OPEN P&L is first (most important) and carries
 // the open-positions count; TODAY P&L is its own box. LANDSCAPE puts OPEN | TODAY
 // side by side, then the rest below. A tiny Menu button sits bottom-right.
+// Make a home stat box tappable → navigate to a detail page.
+static void make_box_nav(lv_obj_t *value_label, int target) {
+  if (!value_label) return;
+  lv_obj_t *box = lv_obj_get_parent(value_label);
+  lv_obj_add_flag(box, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(box, nav_event, LV_EVENT_CLICKED, (void *)(intptr_t)target);
+}
+
 static void build_home_landscape() {
   home_screen = lv_obj_create(NULL);
   lv_obj_t *s = home_screen;
@@ -537,8 +565,8 @@ static void build_home_landscape() {
   // 3 rows x 2 boxes. Boxes in each row share one fixed height (box_h) so the
   // grid lines up neatly. OPEN P&L is first (with the open-positions count).
   lv_obj_t *rHero = hrow(s);
-  hl_open  = vtilex(rHero, "OPEN P&L (now)", &lv_font_montserrat_20, &hl_pos);
-  hl_today = vtile (rHero, "TODAY P&L", &lv_font_montserrat_20);
+  hl_open  = vtilex(rHero, "OPEN P&L", &lv_font_montserrat_20, &hl_pos);
+  hl_today = vtilex(rHero, "TODAY P&L", &lv_font_montserrat_20, &hl_today_sub);
   box_h(hl_open, 68); box_h(hl_today, 68);
 
   lv_obj_t *rB = hrow(s);
@@ -577,8 +605,8 @@ static void build_home_portrait() {
   lv_obj_set_scroll_dir(s, LV_DIR_VER);
   lv_obj_set_scrollbar_mode(s, LV_SCROLLBAR_MODE_AUTO);
 
-  lv_obj_t *r1 = hrow(s); hl_open     = vtilex(r1, "OPEN P&L (now)", &lv_font_montserrat_28, &hl_pos);
-  lv_obj_t *r2 = hrow(s); hl_today    = vtile (r2, "TODAY P&L", &lv_font_montserrat_28);
+  lv_obj_t *r1 = hrow(s); hl_open     = vtilex(r1, "OPEN P&L", &lv_font_montserrat_28, &hl_pos);
+  lv_obj_t *r2 = hrow(s); hl_today    = vtilex(r2, "TODAY P&L", &lv_font_montserrat_28, &hl_today_sub);
   lv_obj_t *r3 = hrow(s); hl_total    = vtile (r3, "TOTAL BALANCE", &lv_font_montserrat_20);
   lv_obj_t *r4 = hrow(s); hl_all      = vtile (r4, "ALL-TIME P&L", &lv_font_montserrat_20);
   lv_obj_t *r5 = hrow(s); hl_earn_day = vtile (r5, "TODAY EARN", &lv_font_montserrat_20);
@@ -595,7 +623,14 @@ static void build_home_portrait() {
   lv_obj_set_height(mb, 30);
 }
 
-static void build_home() { landscape ? build_home_landscape() : build_home_portrait(); }
+static void build_home() {
+  landscape ? build_home_landscape() : build_home_portrait();
+  // Tap a headline figure to drill into its detail page.
+  make_box_nav(hl_open,  PAGE_POSITIONS);   // OPEN P&L  → open positions
+  make_box_nav(hl_today, PAGE_HISTORY);     // TODAY P&L → trade history
+  make_box_nav(hl_earn,  PAGE_EARN);        // EARN BALANCE → earn
+  make_box_nav(hl_earn_day, PAGE_EARN);     // TODAY EARN  → earn
+}
 
 static void update_home() {
   JsonDocument doc;
@@ -607,6 +642,7 @@ static void update_home() {
   double day = ok ? (double)(doc["day"] | 0.0) : 0.0;
   double open = ok ? (double)(doc["open"] | 0.0) : 0.0;
   int npos = ok ? (int)(doc["npos"] | 0) : 0;
+  int ntoday = ok ? (int)(doc["ntoday"] | 0) : 0;
   double earn = ok ? (double)(doc["earn"] | 0.0) : 0.0;
   double eday = ok ? (double)(doc["eday"] | 0.0) : 0.0;
   const char *upd = ok ? (const char *)(doc["upd"] | "--:--") : "--:--";
@@ -617,6 +653,8 @@ static void update_home() {
   lv_obj_set_style_text_color(hl_today, pnlColor(day), 0);
   char nb[28]; snprintf(nb, sizeof(nb), "%d open trade%s", npos, npos == 1 ? "" : "s");
   lv_label_set_text(hl_pos, nb);
+  char tb[28]; snprintf(tb, sizeof(tb), "%d trade%s today", ntoday, ntoday == 1 ? "" : "s");
+  if (hl_today_sub) lv_label_set_text(hl_today_sub, tb);
   kv_set_usd(hl_total, bal);
   kv_set_pnl(hl_open, open);
   kv_set_pnl(hl_all, all);
@@ -659,6 +697,7 @@ static void show_menu() {
 
 static void show_home() {
   current_page = PAGE_HOME;
+  nav_depth = 0;                 // home is the root — clear the back stack
   if (!home_screen) build_home();
   update_home();
   lv_obj_t *prev = lv_scr_act();
@@ -736,6 +775,71 @@ static void show_trader_detail() {
   if (!doc["fd"].isNull()) { snprintf(b, sizeof(b), "%d days", (int)(doc["fd"] | 0)); lv_label_set_text(kv_row(c3, "Following"), b); }
   if (!doc["ml"].isNull()) { snprintf(b, sizeof(b), "%.0f%%", (double)(doc["ml"] | 0.0)); lv_label_set_text(kv_row(c3, "Margin level"), b); }
   if (!doc["start"].isNull()) lv_label_set_text(kv_row(c3, "Started"), doc["start"] | "");
+
+  // Drill into this trader's own open positions / trade history.
+  menu_row(s, "Open Positions", PAGE_TRADER_POSITIONS);
+  menu_row(s, "Trade History",  PAGE_TRADER_HISTORY);
+  show_sub(s);
+}
+
+/* ── TRADER TRADE HISTORY (per trader) ───────────────────────────────────── */
+static void show_trader_history() {
+  current_page = PAGE_TRADER_HISTORY;
+  char name[48] = "Trader";
+  JsonDocument home;
+  if (lastPayload.length() && !deserializeJson(home, lastPayload)) {
+    JsonArray tr = home["traders"].as<JsonArray>();
+    if (trader_detail_idx >= 0 && trader_detail_idx < (int)tr.size()) {
+      const char *nm = tr[trader_detail_idx]["n"] | "Trader";
+      strncpy(name, nm, sizeof(name) - 1);
+    }
+  }
+  lv_obj_t *s = new_page(name, true);
+  JsonDocument doc;
+  String path = String("/api/esp32/history?n=20&trader=") + urlenc(name);
+  if (!httpGetJson(path, doc)) { info_label(s, "could not load", COL_AMBER); show_sub(s); return; }
+  JsonArray ts_ = doc["trades"].as<JsonArray>();
+  if (ts_.size() == 0) { info_label(s, "No closed trades yet", COL_MUTED); show_sub(s); return; }
+  lv_obj_t *c = card(s);
+  for (JsonObject t : ts_) {
+    const char *when = t["t"] | "";
+    const char *sym = t["s"] | "?";
+    bool sh = strcmp((const char *)(t["d"] | "L"), "S") == 0;
+    double pnl = t["p"] | 0.0;
+    char lbl[48]; snprintf(lbl, sizeof(lbl), "%s %s %s", when, sym, sh ? "S" : "L");
+    kv_set_pnl(kv_row(c, lbl), pnl);
+  }
+  show_sub(s);
+}
+
+/* ── TRADER OPEN POSITIONS (per trader) ──────────────────────────────────── */
+static void show_trader_positions() {
+  current_page = PAGE_TRADER_POSITIONS;
+  char name[48] = "Trader";
+  JsonDocument home;
+  if (lastPayload.length() && !deserializeJson(home, lastPayload)) {
+    JsonArray tr = home["traders"].as<JsonArray>();
+    if (trader_detail_idx >= 0 && trader_detail_idx < (int)tr.size()) {
+      const char *nm = tr[trader_detail_idx]["n"] | "Trader";
+      strncpy(name, nm, sizeof(name) - 1);
+    }
+  }
+  lv_obj_t *s = new_page(name, true);
+  JsonDocument doc;
+  String path = String("/api/esp32/positions?trader=") + urlenc(name);
+  if (!httpGetJson(path, doc)) { info_label(s, "could not load", COL_AMBER); show_sub(s); return; }
+  JsonArray ps = doc["positions"].as<JsonArray>();
+  if (ps.size() == 0) { info_label(s, "No open positions", COL_MUTED); show_sub(s); return; }
+  for (JsonObject p : ps) {
+    const char *sym = p["s"] | "?";
+    bool sh = strcmp((const char *)(p["d"] | "L"), "S") == 0;
+    double sz = p["sz"] | 0.0, e = p["e"] | 0.0, u = p["u"] | 0.0;
+    lv_obj_t *c = card(s);
+    char hdr[48]; snprintf(hdr, sizeof(hdr), "%s  %s", sym, sh ? "SHORT" : "LONG");
+    kv_set_pnl(kv_row(c, hdr), u);
+    char det[48]; snprintf(det, sizeof(det), "size %.4g  @ %.2f", sz, e);
+    info_label(c, det, COL_MUTED);
+  }
   show_sub(s);
 }
 
@@ -813,7 +917,7 @@ static void show_history() {
   current_page = PAGE_HISTORY;
   lv_obj_t *s = new_page("Trade History", true);
   JsonDocument doc;
-  if (!httpGetJson("/api/esp32/history?n=30", doc)) { info_label(s, "could not load", COL_AMBER); show_sub(s); return; }
+  if (!httpGetJson("/api/esp32/history?n=20", doc)) { info_label(s, "could not load", COL_AMBER); show_sub(s); return; }
   JsonArray ts_ = doc["trades"].as<JsonArray>();
   if (ts_.size() == 0) { info_label(s, "No closed trades yet", COL_MUTED); show_sub(s); return; }
   lv_obj_t *c = card(s);
@@ -1014,6 +1118,8 @@ static void show_config() {
 }
 
 static void navigate(int page) {
+  if (page == PAGE_BACK) page = nav_pop();             // Back → previous page
+  else if (page != current_page) nav_push(current_page); // forward → remember where we are
   switch (page) {
     case PAGE_MENU:      show_menu();      break;
     case PAGE_CONFIG:    show_config();    break;
@@ -1025,7 +1131,9 @@ static void navigate(int page) {
     case PAGE_POSITIONS: show_positions(); break;
     case PAGE_HISTORY:   show_history();   break;
     case PAGE_EARN:      show_earn();      break;
-    case PAGE_TRADER_DETAIL: show_trader_detail(); break;
+    case PAGE_TRADER_DETAIL:    show_trader_detail();    break;
+    case PAGE_TRADER_HISTORY:   show_trader_history();   break;
+    case PAGE_TRADER_POSITIONS: show_trader_positions(); break;
     default:             show_home();      break;
   }
 }
