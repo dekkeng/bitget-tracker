@@ -659,6 +659,10 @@
               <div class="trader-metric-label">Today</div>
               <div class="trader-metric-val" id="elite-daily">—</div>
             </div>
+            <div id="elite-pst-wrap" style="display:none">
+              <div class="trader-metric-label">Shared today</div>
+              <div class="trader-metric-val green" id="elite-pst">—</div>
+            </div>
           </div>
         </div>
         <div class="trader-right">
@@ -1180,6 +1184,13 @@
         dailyEl.className = 'trader-metric-val ' + colorClass(elite.daily_pnl);
         dailyWrap.style.display = '';
       } else { dailyWrap.style.display = 'none'; }
+      // Profit share accruing today (released ~23:00 Thai)
+      const pstWrap = document.getElementById('elite-pst-wrap');
+      const pstEl   = document.getElementById('elite-pst');
+      if (elite.profit_share_today != null && elite.profit_share_today > 0.005) {
+        pstEl.textContent = '+' + fmtBal(elite.profit_share_today);
+        pstWrap.style.display = '';
+      } else { pstWrap.style.display = 'none'; }
       // All-time PnL
       const atLabel = document.getElementById('elite-alltime-label');
       const atEl    = document.getElementById('elite-alltime');
@@ -1555,7 +1566,7 @@
                 <div class="trader-metric-val">${balStr}</div>
               </div>
               <div>
-                <div class="trader-metric-label">Daily</div>
+                <div class="trader-metric-label">Today</div>
                 <div class="trader-metric-val ${dCls}">${dStr}</div>
               </div>
               <div>

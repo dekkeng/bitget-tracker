@@ -221,6 +221,10 @@ def _ts(name: str) -> dict:
 
 # ── Global (aggregate) MT5 cache ─────────────────────────────────────────────
 
+# A push counts as "fresh" for STALE_SECONDS; the status dot is green within this
+# window (alert heartbeats well under it) and amber once exceeded.
+STALE_SECONDS = 30
+
 _mt5: dict = {
     "positions_raw": None,
     "history_raw": None,
@@ -229,6 +233,7 @@ _mt5: dict = {
     "trades": None,
     "history": None,
     "pushed_at": None,
+    "last_push_ts": 0.0,   # epoch seconds of the most recent push (any kind) — liveness
 }
 
 _investment: dict = {
@@ -512,13 +517,13 @@ def _rebuild_elite() -> None:
     # Daily: prefer trade-derived when we have history; else keep scraped value.
     if trades:
         d["daily_pnl"] = round(daily, 4)
-    # Open PnL: per-position sum when traderPosition returns rows; otherwise keep
-    # the floating PnL already set from the overview (unrealizedProfit).
+    # Open PnL = live sum of the MT5 open positions (pushed every ~10s). When flat,
+    # reset to 0 — must NOT keep the last value, or a closed position's float sticks.
     if positions:
         d["open_pnl"] = round(sum(p["unrealized_pnl"] for p in positions), 4)
         d["open_position_count"] = len(positions)
     else:
-        d.setdefault("open_pnl", 0.0)
+        d["open_pnl"] = 0.0
         d["open_position_count"] = 0
     # all_time_pnl: keep the scraped totalProfit (history window may be partial)
 
@@ -532,6 +537,9 @@ def _rebuild_elite() -> None:
 
 def _push_data(kind: str, data, trader: str = None):
     global _settings
+    _mt5["last_push_ts"] = time.time()   # liveness: any push keeps the dot green
+    if kind == "heartbeat":
+        return                            # liveness ping only — no data, no rebuild
     if trader:
         _ensure_trader(trader, data)
     if trader is None:
@@ -1395,15 +1403,8 @@ async def get_widget():
             "stale": True,
         }
     pushed_at = s.get("pushed_at")
-    stale = True
-    if pushed_at:
-        try:
-            last = datetime.strptime(
-                datetime.now(BKK).strftime("%Y-%m-%d ") + pushed_at, "%Y-%m-%d %H:%M"
-            ).replace(tzinfo=BKK)
-            stale = (datetime.now(BKK) - last).total_seconds() > 900
-        except Exception:
-            stale = False
+    # Fresh if any push (incl. the alert heartbeat) arrived within STALE_SECONDS.
+    stale = (time.time() - _mt5.get("last_push_ts", 0.0)) > STALE_SECONDS
     # Include earn + elite balances so the widget matches the dashboard total
     earn_total  = (_earn["data"] or {}).get("total", 0.0)
     elite_total = (_elite["data"] or {}).get("balance", 0.0)
@@ -1467,15 +1468,8 @@ async def get_esp32():
         }
 
     pushed_at = s.get("pushed_at")
-    stale = True
-    if pushed_at:
-        try:
-            last = datetime.strptime(
-                datetime.now(BKK).strftime("%Y-%m-%d ") + pushed_at, "%Y-%m-%d %H:%M"
-            ).replace(tzinfo=BKK)
-            stale = (datetime.now(BKK) - last).total_seconds() > 900
-        except Exception:
-            stale = False
+    # Fresh if any push (incl. the alert heartbeat) arrived within STALE_SECONDS.
+    stale = (time.time() - _mt5.get("last_push_ts", 0.0)) > STALE_SECONDS
 
     # Compact per-trader rows (skip stopped copies, already counted globally)
     cancelled_names = set(_settings.get("cancelled_trader_names") or [])
@@ -1738,6 +1732,7 @@ async def get_elite():
         "aum": data.get("aum", 0.0),
         "follower_count": data.get("follower_count", 0),
         "profit_share_earned": data.get("profit_share_earned", 0.0),
+        "profit_share_today": data.get("profit_share_today", 0.0),
         "copiers_pnl": data.get("copiers_pnl", 0.0),
         "roi": data.get("roi"),
         "open_positions_pnl": data.get("open_pnl", 0.0),
