@@ -133,9 +133,15 @@ static void fmtUSD(char *out, size_t n, double v) {
 }
 static void fmtPnL(char *out, size_t n, double v) {
   char usd[32]; fmtUSD(usd, sizeof(usd), v);
-  snprintf(out, n, "%s%s", v >= 0 ? "+" : "-", usd);
+  // Zero (or rounds to 0.00) → no sign; only show +/- for real gains/losses.
+  const char *sign = (fabs(v) < 0.005) ? "" : (v > 0 ? "+" : "-");
+  snprintf(out, n, "%s%s", sign, usd);
 }
-static lv_color_t pnlColor(double v) { return v >= 0 ? COL_GREEN : COL_RED; }
+// Zero → white (neutral); green for profit, red for loss.
+static lv_color_t pnlColor(double v) {
+  if (fabs(v) < 0.005) return COL_TEXT;
+  return v > 0 ? COL_GREEN : COL_RED;
+}
 
 /* ── LVGL display + touch glue ───────────────────────────────────────────── */
 static void disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {

@@ -732,68 +732,77 @@ def _push_data(kind: str, data, trader: str = None):
             logger.info("Cancelled copies: %d entries, total net_profit=%.2f, names=%s",
                         new_count, total, cancelled_names)
     elif kind == "elite_trader":
-        # Elite (lead) trader portfolio — data is a single portfolio dict
+        # Lead-trader METADATA from the Bitget overview (all-time PnL, profit share,
+        # followers, AUM, ROI). MERGED into _elite["data"] so it coexists with the
+        # MT5-sourced balance/open/daily (kind="elite_account" + positions/history).
+        # MT5 has no lead-trader stats, so these must come from Bitget.
         row = data if isinstance(data, dict) else {}
         if not row:
             return
-        # Debug: keep the raw Bitget row so /api/mt5/debug can reveal the exact
-        # field names (e.g. which one holds the all-time total profit share).
         _elite["raw_row"] = dict(row)
-        # Reject follower-portfolio shapes: those balances are already counted in
-        # the trader cards, so accepting one here would double-count it.
+        # Reject follower-portfolio shapes (would mean we hit the wrong endpoint).
         if any(k in row for k in ("marginCall", "credit", "connecting")):
             logger.warning("Elite trader push rejected: row looks like a follower portfolio")
             return
-        # Field names confirmed from /v1/trace/mt5/portfolio/overview (flattened):
-        #   totalEquity/estimatedAssets, profit, aum, roi, unrealizedProfit,
-        #   followProfit, waitShareProfit, curFollowCount/maxFollowCount.
-        balance     = _fv("totalEquity", "estimatedAssets", "balance", "equity",
-                          "totalBalance", "totalAsset", src=row)
         all_time    = _fv("profit", "totalProfit", "allTimeProfit",
                           "realizedPnl", "cumulativeProfit", src=row)
         daily       = _fv("dailyProfit", "todayProfit", "dailyPnl",
                           "dayProfit", "profit24h", src=row)
         aum         = _fv("aum", "totalAum", "aumAmount", src=row)
-        unreal      = _fv("unrealizedProfit", "floatProfit", "unrealizedPnl",
-                          "openPnl", src=row)
-        # Lead-trader income: profit share waiting to be released to us, and the
-        # aggregate profit our copiers have made.
         ps_earned   = _fv("waitShareProfit", "totalProfitShare", "profitShareIncome",
                           "sharedProfit", "settledProfitShare", "earnedProfitShare",
                           src=row)
         copiers_pnl = _fv("followProfit", "copiersPnl", "copierPnl", "followerPnl", src=row)
         roi         = _fv("roi", "roiRate", "returnRate", src=row, default=-99999.0)
+        bal_bitget  = _fv("totalEquity", "estimatedAssets", "balance", "equity",
+                          "totalBalance", "totalAsset", src=row)
         copiers_raw = row.get("curFollowCount") or row.get("copiers") or \
                       row.get("followerCount") or row.get("followCount") or \
                       row.get("currentFollowers") or "0"
-        # copiers may be "0/100" string or a plain int
         try:
             followers = int(str(copiers_raw).split("/")[0])
         except (TypeError, ValueError):
             followers = 0
-        # Preserve position-derived fields (open_pnl, open_position_count) that
-        # come from the separate elite_positions push, then re-derive below.
-        prev = _elite["data"] or {}
-        _elite["data"] = {
-            "balance": round(balance, 2),
-            "all_time_pnl": round(all_time, 4),
-            "daily_pnl": round(daily, 4),
-            "aum": round(aum, 2),
-            "follower_count": followers,
-            "profit_share_earned": round(ps_earned, 2),
-            "copiers_pnl": round(copiers_pnl, 2),
-            "roi": (round(roi * 100 if -1 <= roi <= 1 else roi, 2)
-                    if roi != -99999.0 else None),
-            # Floating PnL from the overview; _rebuild_elite overrides this with
-            # the per-position sum when traderPosition returns open rows.
-            "open_pnl": round(unreal, 2) if unreal else prev.get("open_pnl", 0.0),
-            "open_position_count": prev.get("open_position_count", 0),
-        }
+        d = dict(_elite["data"] or {})
+        d["all_time_pnl"]        = round(all_time, 4)
+        d["daily_pnl"]           = round(daily, 4)   # overridden by _rebuild_elite if MT5 history present
+        d["aum"]                 = round(aum, 2)
+        d["follower_count"]      = followers
+        d["profit_share_earned"] = round(ps_earned, 2)
+        d["copiers_pnl"]         = round(copiers_pnl, 2)
+        if roi != -99999.0:
+            d["roi"] = round(roi * 100 if -1 <= roi <= 1 else roi, 2)
+        # Balance is owned by MT5 (elite_account); use Bitget's only as a fallback.
+        if not d.get("balance") and bal_bitget:
+            d["balance"] = round(bal_bitget, 2)
+        d.setdefault("open_pnl", 0.0)
+        d.setdefault("open_position_count", 0)
+        _elite["data"] = d
         _elite["fetched_at"] = datetime.now(BKK).isoformat()
         _elite["error"] = None
         _rebuild_elite()
-        logger.info("Elite trader: balance=%.2f all_time=%.2f followers=%d ps_earned=%.2f",
-                    balance, all_time, followers, ps_earned)
+        logger.info("Elite meta (Bitget): all_time=%.2f followers=%d ps_earned=%.2f aum=%.2f",
+                    all_time, followers, ps_earned, aum)
+    elif kind == "elite_account":
+        # MT5 account: the real execution account — owns balance + floating PnL.
+        # all-time / profit-share / followers come from Bitget (kind="elite_trader").
+        row = data if isinstance(data, dict) else {}
+        d = dict(_elite["data"] or {})
+        bal = _fv("balance", "equity", src=row)
+        if bal:
+            d["balance"] = round(bal, 2)
+        eq = _fv("equity", "netValue", src=row)
+        if eq:
+            d["equity"] = round(eq, 2)
+        # open_pnl normally derived from elite_positions; keep MT5 float as fallback.
+        flt = _fv("floatProfit", "profit", "unrealizedPnl", "openPnl", src=row)
+        if not d.get("open_pnl") and flt:
+            d["open_pnl"] = round(flt, 2)
+        d.setdefault("all_time_pnl", 0.0)
+        d.setdefault("open_position_count", 0)
+        _elite["data"] = d
+        _elite["fetched_at"] = datetime.now(BKK).isoformat()
+        _rebuild_elite()
     elif kind == "elite_positions":
         # Open positions for the elite (lead) portfolio — same shape as the
         # global tracePosition payload, parsed by _parse_positions.
