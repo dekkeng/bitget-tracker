@@ -832,6 +832,11 @@ def _push_data(kind: str, data, trader: str = None):
                 d["daily_pnl"] = round(float(row["dayProfit"]), 4)
             except (TypeError, ValueError):
                 pass
+        if "dayCount" in row:
+            try:
+                d["trades_today"] = int(row["dayCount"])
+            except (TypeError, ValueError):
+                pass
         d.setdefault("all_time_pnl", 0.0)
         d.setdefault("open_position_count", 0)
         _elite["data"] = d
@@ -1029,19 +1034,21 @@ def _rebuild_summary() -> None:
         total_open_count += s.get("open_position_count", 0)
 
     # Open PnL/count are already summed per-trader above (from each trader's
-    # own positions_raw). Count today's closed trades for the TODAY P&L subtitle.
+    # own positions_raw). Count today's closed trades (BKK midnight cutoff) for the
+    # TODAY P&L subtitle: copy traders from Bitget close timestamps (ms, accurate);
+    # elite from the MT5 /history/today deal_count (the MT5 deal timestamps carry
+    # the broker tz, so we trust the bridge's BKK count instead).
     today_start_ms, today_end_ms = _bkk_today_range_ms()
     trades_today = sum(1 for t in all_trades
                        if today_start_ms <= t.get("close_time_ms", 0) < today_end_ms)
-    trades_today += sum(1 for t in (_elite.get("trades") or [])
-                        if today_start_ms <= t.get("close_time_ms", 0) < today_end_ms)
 
-    # Elite (lead) portfolio is tracked like a trader: fold its open positions,
-    # open PnL and daily PnL into the grand totals so the dashboard reflects it.
+    # Elite (lead) portfolio: fold its open positions, open PnL, daily PnL and
+    # today's trade count into the grand totals.
     elite_d = _elite["data"] or {}
     total_open_pnl   += elite_d.get("open_pnl", 0.0)
     total_open_count += elite_d.get("open_position_count", 0)
     total_daily_pnl  += elite_d.get("daily_pnl", 0.0)
+    trades_today     += int(elite_d.get("trades_today", 0))
 
     # Earn (Bitget savings) interest is income — fold into daily & all-time PnL totals.
     earn_d = _earn["data"] or {}
