@@ -950,6 +950,12 @@ def _rebuild_summary() -> None:
     total_open_count += elite_d.get("open_position_count", 0)
     total_daily_pnl  += elite_d.get("daily_pnl", 0.0)
 
+    # Earn (Bitget savings) interest is income — fold into daily & all-time PnL totals.
+    earn_d = _earn["data"] or {}
+    earn_day_pnl = earn_d.get("interest_24h") or 0.0
+    earn_all_pnl = earn_d.get("total_interest") or 0.0
+    total_daily_pnl += earn_day_pnl
+
     # If API investment is available and positive, use it as the authoritative total
     if _investment.get("data") and _investment["data"].get("net", 0) > 0:
         total_investment = _investment["data"]["net"]
@@ -964,7 +970,7 @@ def _rebuild_summary() -> None:
         "daily_pnl": round(total_daily_pnl, 4),
         "open_positions": total_open_count,
         "open_positions_pnl": round(total_open_pnl, 4),
-        "all_time_pnl": round(total_all_time_pnl + cancelled_copy_pnl + elite_all_time_pnl, 4),
+        "all_time_pnl": round(total_all_time_pnl + cancelled_copy_pnl + elite_all_time_pnl + earn_all_pnl, 4),
         "active_trader_pnl": round(total_all_time_pnl, 4),
         "cancelled_copy_pnl": cancelled_copy_pnl,
         "cancelled_copy_count": cancelled_copy_count,
@@ -1029,6 +1035,11 @@ async def _refresh_earn() -> None:
         _earn["fetched_at"] = datetime.now(BKK).isoformat()
         _earn["error"] = result.get("error")
         logger.info("Earn refreshed: total=%.2f apr=%s", result["total"], result.get("apr"))
+        # Earn interest folds into daily/all-time PnL — rebuild so totals reflect it.
+        try:
+            _rebuild_summary()
+        except Exception as e:
+            logger.error("_rebuild_summary after earn refresh failed: %s", e)
     except Exception as e:
         _earn["error"] = str(e)
         logger.error("Earn refresh failed: %s", e)
