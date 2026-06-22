@@ -225,6 +225,10 @@ def _ts(name: str) -> dict:
 # window (alert heartbeats well under it) and amber once exceeded.
 STALE_SECONDS = 30
 
+# Per-process id returned on every push. The ephemeral FS means a restart wipes
+# all pushed state; alert watches this and force-resyncs when it changes.
+BOOT_ID = str(int(time.time() * 1000))
+
 _mt5: dict = {
     "positions_raw": None,
     "history_raw": None,
@@ -1186,7 +1190,7 @@ app.add_middleware(
 async def push_mt5(request: Request):
     body = await request.json()
     _push_data(body.get("kind"), body.get("data"), body.get("trader"))
-    return {"ok": True}
+    return {"ok": True, "boot": BOOT_ID}
 
 
 @app.get("/api/mt5")
