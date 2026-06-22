@@ -1055,14 +1055,18 @@ async def lifespan(app: FastAPI):
         })):
             logger.info("Restored cookie from BITGET_COOKIE env var (%d chars)", len(env_cookie))
 
-    from browser_poller import start_poller
-    task = asyncio.create_task(start_poller(_push_data))
-    inv_task = asyncio.create_task(_investment_poller())
-    earn_task = asyncio.create_task(_earn_poller())
+    tasks = [
+        asyncio.create_task(_investment_poller()),
+        asyncio.create_task(_earn_poller()),
+    ]
+    if os.environ.get("DISABLE_POLLER"):
+        logger.info("Browser poller disabled (DISABLE_POLLER is set) — expecting push from bitget-alert")
+    else:
+        from browser_poller import start_poller
+        tasks.append(asyncio.create_task(start_poller(_push_data)))
     yield
-    task.cancel()
-    inv_task.cancel()
-    earn_task.cancel()
+    for t in tasks:
+        t.cancel()
 
 
 app = FastAPI(lifespan=lifespan)
