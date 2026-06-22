@@ -514,13 +514,8 @@ def _rebuild_elite() -> None:
     trades = _parse_trades(_elite.get("history_raw"))
     positions = _parse_positions(_elite.get("positions_raw"))
 
-    today_start_ms, today_end_ms = _bkk_today_range_ms()
-    daily = sum(t["pnl"] for t in trades
-                if today_start_ms <= t["close_time_ms"] < today_end_ms)
-
-    # Daily: prefer trade-derived when we have history; else keep scraped value.
-    if trades:
-        d["daily_pnl"] = round(daily, 4)
+    # daily_pnl comes straight from MT5 (/history/today via elite_account.dayProfit);
+    # don't recompute from deal timestamps here (broker tz made it read 0).
     # Open PnL = live sum of the MT5 open positions (pushed every ~10s). When flat,
     # reset to 0 — must NOT keep the last value, or a closed position's float sticks.
     if positions:
@@ -794,7 +789,7 @@ def _push_data(kind: str, data, trader: str = None):
             followers = 0
         d = dict(_elite["data"] or {})
         d["all_time_pnl"]        = round(all_time, 4)
-        d["daily_pnl"]           = round(daily, 4)   # overridden by _rebuild_elite if MT5 history present
+        # daily_pnl is owned by MT5 (elite_account.dayProfit) — don't set it here.
         d["aum"]                 = round(aum, 2)
         d["follower_count"]      = followers
         d["profit_share_today"] = round(ps_today, 2)
@@ -830,6 +825,13 @@ def _push_data(kind: str, data, trader: str = None):
         flt = _fv("floatProfit", "profit", "unrealizedPnl", "openPnl", src=row)
         if not d.get("open_pnl") and flt:
             d["open_pnl"] = round(flt, 2)
+        # Today's realized PnL straight from MT5 (/history/today) — authoritative,
+        # avoids the deal-timestamp timezone issue in the trade-derived calc.
+        if "dayProfit" in row:
+            try:
+                d["daily_pnl"] = round(float(row["dayProfit"]), 4)
+            except (TypeError, ValueError):
+                pass
         d.setdefault("all_time_pnl", 0.0)
         d.setdefault("open_position_count", 0)
         _elite["data"] = d
