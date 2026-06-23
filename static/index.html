@@ -271,7 +271,25 @@
     }
     .side-badge.long  { background: rgba(0,196,122,0.10); color: var(--green); }
     .side-badge.short { background: rgba(232,64,64,0.10);  color: var(--red); }
+    .src-badge {
+      display: inline-block; padding: 1px 6px; border-radius: 5px;
+      background: var(--border); color: var(--muted);
+      font-size: 9px; font-weight: 600; letter-spacing: 0.3px; white-space: nowrap;
+    }
     .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 20px 0; }
+
+    /* ── Pager (swipe left/right for long lists) ─────────────────── */
+    .pager {
+      display: flex; align-items: center; justify-content: center; gap: 14px;
+      padding: 8px 0 2px;
+    }
+    .pager-btn {
+      background: var(--border); color: var(--text); border: none; cursor: pointer;
+      width: 30px; height: 26px; border-radius: 7px; font-size: 15px; line-height: 1;
+      font-family: var(--sans);
+    }
+    .pager-btn:disabled { opacity: 0.35; cursor: default; }
+    .pager-info { font-size: 11px; color: var(--muted); min-width: 42px; text-align: center; }
 
     /* ── Traders section — compact list ──────────────────────── */
     #traders-section { border-bottom: 1px solid var(--border); }
@@ -658,6 +676,10 @@
             <div id="elite-daily-wrap" style="display:none">
               <div class="trader-metric-label">Today</div>
               <div class="trader-metric-val" id="elite-daily">—</div>
+            </div>
+            <div id="elite-open-wrap" style="display:none">
+              <div class="trader-metric-label">Open</div>
+              <div class="trader-metric-val" id="elite-open">—</div>
             </div>
             <div id="elite-pst-wrap" style="display:none">
               <div class="trader-metric-label">Shared today</div>
@@ -1088,45 +1110,75 @@
     canvas.addEventListener('touchend', hideHover, { passive: true });
   }
 
+  // Render a list as swipeable/paged pages so it never runs off-screen. The
+  // current page is kept on the element (data-page) so 30s refreshes / live
+  // updates don't snap back to page 1.
+  function renderPaged(el, items, perPage, theadHtml, rowFn, emptyMsg) {
+    if (!items || !items.length) { el.innerHTML = `<div class="empty">${emptyMsg}</div>`; el.dataset.page = 0; return; }
+    const pages = [];
+    for (let i = 0; i < items.length; i += perPage) pages.push(items.slice(i, i + perPage));
+    let cur = Math.min(parseInt(el.dataset.page || '0', 10) || 0, pages.length - 1);
+    const go = d => { cur = Math.max(0, Math.min(pages.length - 1, cur + d)); draw(); };
+    function draw() {
+      el.dataset.page = cur;
+      const rows = pages[cur].map(rowFn).join('');
+      const nav = pages.length > 1
+        ? `<div class="pager">
+             <button class="pager-btn" data-d="-1" ${cur === 0 ? 'disabled' : ''}>‹</button>
+             <span class="pager-info">${cur + 1} / ${pages.length}</span>
+             <button class="pager-btn" data-d="1" ${cur === pages.length - 1 ? 'disabled' : ''}>›</button>
+           </div>` : '';
+      el.innerHTML = `<table class="data-table">${theadHtml}<tbody>${rows}</tbody></table>${nav}`;
+      el.querySelectorAll('.pager-btn').forEach(b => b.onclick = () => go(parseInt(b.dataset.d, 10)));
+    }
+    let sx = null;
+    el.ontouchstart = e => { sx = e.touches[0].clientX; };
+    el.ontouchend = e => {
+      if (sx == null) return;
+      const dx = e.changedTouches[0].clientX - sx; sx = null;
+      if (Math.abs(dx) > 50) go(dx < 0 ? 1 : -1);
+    };
+    draw();
+  }
+
   function renderPositions(positions) {
     const el = document.getElementById('positions-body');
-    if (!positions || !positions.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
-    const rows = positions.map(p => {
-      const cls = colorClass(p.unrealized_pnl);
-      return `<tr>
-        <td><strong>${p.symbol}</strong><br><span class="side-badge ${p.side}">${p.side.toUpperCase()}</span></td>
-        <td class="mono" style="text-align:right">${p.size}<br><span style="font-size:10px;color:var(--muted)">@${p.entry_price.toFixed(2)}</span></td>
-        <td class="mono ${cls}" style="text-align:right;font-weight:600">${fmt(p.unrealized_pnl)}${p.live ? `<br><span style="font-size:9px;color:var(--muted);font-weight:400">→ ${p.live_price.toFixed(2)} live</span>` : ''}</td>
-      </tr>`;
-    }).join('');
-    el.innerHTML = `<table class="data-table">
-      <thead><tr><th>Symbol</th><th style="text-align:right">Size</th><th style="text-align:right">uPnL</th></tr></thead>
-      <tbody>${rows}</tbody></table>`;
+    renderPaged(el, positions, 6,
+      `<thead><tr><th>Symbol</th><th>From</th><th style="text-align:right">Size</th><th style="text-align:right">uPnL</th></tr></thead>`,
+      p => {
+        const cls = colorClass(p.unrealized_pnl);
+        return `<tr>
+          <td><strong>${esc(p.symbol)}</strong><br><span class="side-badge ${p.side}">${p.side.toUpperCase()}</span></td>
+          <td><span class="src-badge">${esc(p.src || '—')}</span></td>
+          <td class="mono" style="text-align:right">${(p.size || 0).toFixed(2)}<br><span style="font-size:10px;color:var(--muted)">@${(p.entry_price || 0).toFixed(2)}</span></td>
+          <td class="mono ${cls}" style="text-align:right;font-weight:600">${fmt(p.unrealized_pnl)}${p.live ? `<br><span style="font-size:9px;color:var(--muted);font-weight:400">→ ${p.live_price.toFixed(2)} live</span>` : ''}</td>
+        </tr>`;
+      },
+      'No open positions');
   }
 
   function renderTrades(trades) {
     const el = document.getElementById('trades-body');
-    if (!trades || !trades.length) { el.innerHTML = '<div class="empty">No trade history</div>'; return; }
-    const rows = trades.map(t => {
-      const cls = colorClass(t.pnl);
-      const hasPrice = t.open_price > 0 || t.close_price > 0;
-      const priceStr = hasPrice
-        ? `${t.open_price > 0 ? t.open_price.toFixed(2) : '—'} → ${t.close_price > 0 ? t.close_price.toFixed(2) : '—'}`
-        : '';
-      return `<tr>
-        <td><strong>${t.symbol}</strong><br><span style="font-size:10px;color:var(--muted)">${t.time}</span></td>
-        <td><span class="side-badge ${t.side}">${t.side.toUpperCase()}</span><br>
-            <span class="mono" style="font-size:10px;color:var(--muted)">${t.size}</span></td>
-        <td class="mono" style="font-size:10px;color:var(--muted);text-align:right">${priceStr}</td>
-        <td style="text-align:right">
-          <div class="mono ${cls}" style="font-weight:600">${fmt(t.pnl)}</div>
-          <div class="mono" style="font-size:10px;color:var(--muted)">$${t.commission}</div>
-        </td>
-      </tr>`;
-    }).join('');
-    el.innerHTML = `<table class="data-table">
-      <thead><tr><th>Trade</th><th>Side</th><th style="text-align:right">Open → Close</th><th style="text-align:right">PnL</th></tr></thead>
-      <tbody>${rows}</tbody></table>`;
+    renderPaged(el, trades, 7,
+      `<thead><tr><th>Trade</th><th>Side</th><th style="text-align:right">Open → Close</th><th style="text-align:right">PnL</th></tr></thead>`,
+      t => {
+        const cls = colorClass(t.pnl);
+        const hasPrice = t.open_price > 0 || t.close_price > 0;
+        const priceStr = hasPrice
+          ? `${t.open_price > 0 ? t.open_price.toFixed(2) : '—'} → ${t.close_price > 0 ? t.close_price.toFixed(2) : '—'}`
+          : '';
+        return `<tr>
+          <td><strong>${esc(t.symbol)}</strong> <span class="src-badge">${esc(t.src || '—')}</span><br><span style="font-size:10px;color:var(--muted)">${t.time}</span></td>
+          <td><span class="side-badge ${t.side}">${t.side.toUpperCase()}</span><br>
+              <span class="mono" style="font-size:10px;color:var(--muted)">${(t.size || 0).toFixed(2)}</span></td>
+          <td class="mono" style="font-size:10px;color:var(--muted);text-align:right">${priceStr}</td>
+          <td style="text-align:right">
+            <div class="mono ${cls}" style="font-weight:600">${fmt(t.pnl)}</div>
+            <div class="mono" style="font-size:10px;color:var(--muted)">$${t.commission}</div>
+          </td>
+        </tr>`;
+      },
+      'No trade history');
   }
 
   async function fetchInvestment() {
@@ -1184,6 +1236,14 @@
         dailyEl.className = 'trader-metric-val ' + colorClass(elite.daily_pnl);
         dailyWrap.style.display = '';
       } else { dailyWrap.style.display = 'none'; }
+      // Open (floating) PnL of the MT5 positions
+      const openWrap = document.getElementById('elite-open-wrap');
+      const openEl   = document.getElementById('elite-open');
+      if (elite.open_positions_pnl != null && Math.abs(elite.open_positions_pnl) >= 0.005) {
+        openEl.textContent = fmt(elite.open_positions_pnl);
+        openEl.className = 'trader-metric-val ' + colorClass(elite.open_positions_pnl);
+        openWrap.style.display = '';
+      } else { openWrap.style.display = 'none'; }
       // Profit share accruing today (released ~23:00 Thai)
       const pstWrap = document.getElementById('elite-pst-wrap');
       const pstEl   = document.getElementById('elite-pst');

@@ -1225,7 +1225,18 @@ async def get_mt5_traders():
 
 @app.get("/api/mt5/positions")
 async def get_mt5_positions():
-    return _all_positions()
+    """Open positions across all copy traders + the elite (MT5) portfolio, each
+    tagged with its source so the dashboard can show where the trade came from."""
+    cancelled = set(_settings.get("cancelled_trader_names") or [])
+    out = []
+    for name in _trader_names():
+        if name in cancelled:
+            continue
+        for p in _parse_positions(_tc(name).get("positions_raw")):
+            out.append({**p, "src": name})
+    for p in (_elite.get("positions") or []):
+        out.append({**p, "src": "Elite"})
+    return out
 
 
 @app.get("/api/mt5/positions/raw")
@@ -1312,7 +1323,22 @@ async def get_prices():
 
 @app.get("/api/mt5/trades")
 async def get_mt5_trades():
-    return _mt5["trades"] or []
+    """Closed trades across all copy traders + the elite (MT5) portfolio, tagged
+    with source, newest first, capped at 100 (the dashboard paginates)."""
+    cancelled = set(_settings.get("cancelled_trader_names") or [])
+    out = []
+    for name in _trader_names():
+        if name in cancelled:
+            continue
+        tc = _tc(name)
+        if tc["summary"] is None:
+            _rebuild_trader_summary(name)
+        for t in (tc.get("trades") or []):
+            out.append({**t, "src": name})
+    for t in (_elite.get("trades") or []):
+        out.append({**t, "src": "Elite"})
+    out.sort(key=lambda t: t.get("close_time_ms", 0), reverse=True)
+    return out[:100]
 
 
 @app.get("/api/mt5/history")
