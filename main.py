@@ -880,6 +880,10 @@ def _push_data(kind: str, data, trader: str = None):
                 _save_settings(_settings)
                 logger.info("Auto-updated investment[%s]=%.2f from fund_flow (%d rows)",
                             trader, inv, len(rows))
+    elif kind == "trader_config":
+        # Per-trader display/accounting options pushed from alert's traders.json.
+        if isinstance(data, dict) and "count_in_total" in data:
+            ts["count_in_total"] = bool(data["count_in_total"])
     elif kind == "investment":
         # Net deposits/withdrawals, fetched by alert via official REST (pure-receiver mode)
         if isinstance(data, dict):
@@ -1021,26 +1025,26 @@ def _rebuild_summary() -> None:
     # Traders that have been stopped — their PnL already counted in cancelled_copy_pnl
     cancelled_names = set(_settings.get("cancelled_trader_names") or [])
 
+    today_start_ms, today_end_ms = _bkk_today_range_ms()
+    trades_today = 0
     for name in _trader_names():
         if name in cancelled_names:
             continue  # PnL counted in cancelled_copy_pnl; skip to avoid double-count
         s = _rebuild_trader_summary(name)
-        all_trades.extend(_tc(name)["trades"] or [])
-        total_balance += s["balance"]
-        total_investment += s["investment"]
-        total_daily_pnl += s["daily_pnl"]
-        total_all_time_pnl += s["all_time_pnl"]
-        total_open_pnl += s["open_positions_pnl"]
-        total_open_count += s.get("open_position_count", 0)
-
-    # Open PnL/count are already summed per-trader above (from each trader's
-    # own positions_raw). Count today's closed trades (BKK midnight cutoff) for the
-    # TODAY P&L subtitle: copy traders from Bitget close timestamps (ms, accurate);
-    # elite from the MT5 /history/today deal_count (the MT5 deal timestamps carry
-    # the broker tz, so we trust the bridge's BKK count instead).
-    today_start_ms, today_end_ms = _bkk_today_range_ms()
-    trades_today = sum(1 for t in all_trades
-                       if today_start_ms <= t.get("close_time_ms", 0) < today_end_ms)
+        trades = _tc(name)["trades"] or []
+        all_trades.extend(trades)   # the trade list always shows every trader
+        # A trader can be set to "alerts / tracking only" (count_in_total=false): we
+        # still keep its trades, positions and alerts, but exclude its PnL/balance
+        # from the portfolio totals.
+        if _ts(name).get("count_in_total", True):
+            total_balance += s["balance"]
+            total_investment += s["investment"]
+            total_daily_pnl += s["daily_pnl"]
+            total_all_time_pnl += s["all_time_pnl"]
+            total_open_pnl += s["open_positions_pnl"]
+            total_open_count += s.get("open_position_count", 0)
+            trades_today += sum(1 for t in trades
+                                if today_start_ms <= t.get("close_time_ms", 0) < today_end_ms)
 
     # Elite (lead) portfolio: fold its open positions, open PnL, daily PnL and
     # today's trade count into the grand totals.
@@ -1049,6 +1053,10 @@ def _rebuild_summary() -> None:
     total_open_count += elite_d.get("open_position_count", 0)
     total_daily_pnl  += elite_d.get("daily_pnl", 0.0)
     trades_today     += int(elite_d.get("trades_today", 0))
+    # Elite profit share is the user's INCOME (earned from copiers) — add it, don't
+    # deduct: today's pending into daily, cumulative into all-time.
+    total_daily_pnl  += elite_d.get("profit_share_today", 0.0)
+    elite_ps_earned  = round(elite_d.get("profit_share_earned", 0.0), 4)
 
     # Earn (Bitget savings) interest is income — fold into daily & all-time PnL totals.
     earn_d = _earn["data"] or {}
@@ -1071,7 +1079,7 @@ def _rebuild_summary() -> None:
         "open_positions": total_open_count,
         "open_positions_pnl": round(total_open_pnl, 4),
         "trades_today": trades_today,
-        "all_time_pnl": round(total_all_time_pnl + cancelled_copy_pnl + elite_all_time_pnl + earn_all_pnl, 4),
+        "all_time_pnl": round(total_all_time_pnl + cancelled_copy_pnl + elite_all_time_pnl + earn_all_pnl + elite_ps_earned, 4),
         "active_trader_pnl": round(total_all_time_pnl, 4),
         "cancelled_copy_pnl": cancelled_copy_pnl,
         "cancelled_copy_count": cancelled_copy_count,
