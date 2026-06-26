@@ -1238,8 +1238,8 @@ async def get_mt5_positions():
     cancelled = set(_settings.get("cancelled_trader_names") or [])
     out = []
     for name in _trader_names():
-        if name in cancelled:
-            continue
+        if name in cancelled or not _ts(name).get("count_in_total", True):
+            continue   # excluded traders don't appear in the aggregate dashboard list
         for p in _parse_positions(_tc(name).get("positions_raw")):
             out.append({**p, "src": name})
     for p in (_elite.get("positions") or []):
@@ -1336,8 +1336,8 @@ async def get_mt5_trades():
     cancelled = set(_settings.get("cancelled_trader_names") or [])
     out = []
     for name in _trader_names():
-        if name in cancelled:
-            continue
+        if name in cancelled or not _ts(name).get("count_in_total", True):
+            continue   # excluded traders don't appear in the aggregate dashboard list
         tc = _tc(name)
         if tc["summary"] is None:
             _rebuild_trader_summary(name)
@@ -1565,10 +1565,11 @@ async def get_esp32_positions(trader: str = None):
     out = []
     cancelled = set(_settings.get("cancelled_trader_names") or [])
     if trader and trader in _trader_names():
-        names = [trader]
+        names = [trader]                       # per-trader view always shows the trader
         include_elite = False
     else:
-        names = [n for n in _trader_names() if n not in cancelled]
+        names = [n for n in _trader_names()
+                 if n not in cancelled and _ts(n).get("count_in_total", True)]
         include_elite = True
     for name in names:
         for p in _parse_positions(_tc(name).get("positions_raw")):
@@ -1599,7 +1600,16 @@ async def get_esp32_history(n: int = 30, trader: str = None):
             _rebuild_trader_summary(trader)
         trades = list(tc.get("trades") or [])
     else:
-        trades = list(_mt5["trades"] or []) + list(_elite.get("trades") or [])
+        cancelled = set(_settings.get("cancelled_trader_names") or [])
+        trades = []
+        for n in _trader_names():
+            if n in cancelled or not _ts(n).get("count_in_total", True):
+                continue   # excluded traders don't appear in the aggregate list
+            tc = _tc(n)
+            if tc["summary"] is None:
+                _rebuild_trader_summary(n)
+            trades.extend(tc.get("trades") or [])
+        trades.extend(_elite.get("trades") or [])
     trades.sort(key=lambda t: t.get("close_time_ms", 0), reverse=True)
     out = []
     for t in trades[:n]:
