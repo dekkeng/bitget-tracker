@@ -356,7 +356,7 @@ def _parse_positions(raw: Any) -> list[dict]:
                 "size": _fv("volume", "holdSize", "openSize", "size", "openOrderSize", "total", src=p),
                 "entry_price": _fv("openPrice", "openPriceAvg", "averageOpenPrice", "entryPrice", src=p),
                 "unrealized_pnl": round(_fv("profit", "unrealizedPL", "unrealizedPnl",
-                                            "unrealizedPNL", "upl", src=p), 4),
+                                            "unrealizedPNL", "unrealizedProfit", "floatingProfit", "upl", src=p), 4),
             })
         except (TypeError, ValueError):
             continue
@@ -476,19 +476,33 @@ def _load_credentials() -> dict | None:
 
 # ── History merge + elite rebuild ─────────────────────────────────────────────
 
-def _trade_dedup_key(r: dict) -> str:
+def _legacy_trade_key(r: dict) -> str:
     ct = (r.get("closeTime") or r.get("closedAt") or
           r.get("closeTs") or r.get("ctime") or "")
     return f"{ct}_{r.get('symbol', '')}"
 
 
+def _trade_dedup_key(r: dict) -> str:
+    for key in ("ticket", "dealId", "orderId", "positionId", "id"):
+        if r.get(key) is not None:
+            return f"{key}:{r[key]}"
+    return _legacy_trade_key(r)
+
+
 def _merge_history_rows(existing_rows: list, new_rows: list) -> list:
-    """Merge new closed-trade rows with existing ones, dedup by close-time+symbol,
+    """Merge new closed-trade rows with existing ones, prefer stable deal IDs,
     and trim to the last 365 days. Shared by trader and elite history paths."""
-    seen = {_trade_dedup_key(r) for r in new_rows if isinstance(r, dict)}
-    merged = list(new_rows)
-    for r in existing_rows:
-        if isinstance(r, dict) and _trade_dedup_key(r) not in seen:
+    rows = [r for r in [*new_rows, *existing_rows] if isinstance(r, dict)]
+    identified = {_legacy_trade_key(r) for r in rows if _trade_dedup_key(r) != _legacy_trade_key(r)}
+    seen = set()
+    merged = []
+    for r in rows:
+        key = _trade_dedup_key(r)
+        # Upgraded alert sends tickets. Replace old ticketless rows on replay.
+        if key == _legacy_trade_key(r) and key in identified:
+            continue
+        if key not in seen:
+            seen.add(key)
             merged.append(r)
     cutoff_ms = int((datetime.now(BKK) - timedelta(days=365)).timestamp() * 1000)
 
@@ -518,12 +532,16 @@ def _rebuild_elite() -> None:
     # don't recompute from deal timestamps here (broker tz made it read 0).
     # Open PnL = live sum of the MT5 open positions (pushed every ~10s). When flat,
     # reset to 0 — must NOT keep the last value, or a closed position's float sticks.
-    if positions:
+    if ("account_open_pnl" in d and
+            _elite.get("account_ts", 0) > _elite.get("positions_ts", 0)):
+        d["open_pnl"] = d["account_open_pnl"]
+        d["open_position_count"] = len(positions)
+    elif _elite.get("positions_raw") is not None:
         d["open_pnl"] = round(sum(p["unrealized_pnl"] for p in positions), 4)
         d["open_position_count"] = len(positions)
     else:
-        d["open_pnl"] = 0.0
-        d["open_position_count"] = 0
+        d["open_pnl"] = d.get("account_open_pnl", d.get("meta_open_pnl", 0.0))
+        d.setdefault("open_position_count", 0)
     # all_time_pnl: keep the scraped totalProfit (history window may be partial)
 
     _elite["trades"] = trades
@@ -550,6 +568,7 @@ def _push_data(kind: str, data, trader: str = None):
     if kind == "positions":
         # Per-trader open positions (alert pushes one payload per trader).
         tc["positions_raw"] = data
+        tc["positions_ts"] = time.monotonic_ns()
         _mt5["positions_raw"] = data  # kept for legacy single-trader callers
         _mt5["pushed_at"] = datetime.now(BKK).strftime("%H:%M")
         tc["pushed_at"] = _mt5["pushed_at"]
@@ -566,18 +585,22 @@ def _push_data(kind: str, data, trader: str = None):
             _save_history(trader, merged)
             logger.info("History[%s]: merged %d new + kept old → %d total rows",
                         trader, len(new_rows), len(merged))
-        else:
+        elif tc.get("history_raw") is None:
             tc["history_raw"] = data
     elif kind == "copy_details":
         tc["pushed_at"] = datetime.now(BKK).strftime("%H:%M")
         _mt5["pushed_at"] = tc["pushed_at"]
         if isinstance(data, dict):
             changed = False
-            for key in list(data.keys()):
+            # Explicit cash balance wins over equity regardless of JSON key order.
+            balance_keys = list(dict.fromkeys(["balance", "totalBalance", "total_balance", *data.keys()]))
+            for key in balance_keys:
+                if key not in data:
+                    continue
                 if any(pat in key.lower() for pat in _BALANCE_PATS):
                     try:
                         val = round(float(data[key]), 2)
-                        if val > 0:
+                        if val >= 0:
                             ts["balance"] = val
                             changed = True
                             logger.info("Auto-updated balance[%s]=%.2f from key=%s", trader, val, key)
@@ -640,12 +663,15 @@ def _push_data(kind: str, data, trader: str = None):
             if not open_pnl_found:
                 # equity - balance fallback (handles any field naming)
                 try:
-                    eq = float(data.get("equity") or data.get("netValue") or data.get("totalEquity") or 0)
-                    bal = float(data.get("balance") or ts.get("balance") or 0)
-                    if eq > 0 and bal > 0 and abs(eq - bal) > 0.001:
+                    eq = _fv("equity", "netValue", "totalEquity", src=data, default=None)
+                    bal = _fv("balance", src=data, default=ts.get("balance"))
+                    if eq is not None and bal is not None:
                         ts["open_pnl"] = round(eq - bal, 2)
+                        open_pnl_found = True
                 except (TypeError, ValueError):
                     pass
+            if open_pnl_found:
+                tc["open_summary_ts"] = time.monotonic_ns()
             # Log all keys on first push so we can diagnose field names
             if not ts.get("_copy_detail_keys"):
                 ts["_copy_detail_keys"] = list(data.keys())[:20]
@@ -788,6 +814,8 @@ def _push_data(kind: str, data, trader: str = None):
         except (TypeError, ValueError):
             followers = 0
         d = dict(_elite["data"] or {})
+        if "unrealizedProfit" in row:
+            d["meta_open_pnl"] = _fv("unrealizedProfit", src=row)
         d["all_time_pnl"]        = round(all_time, 4)
         # daily_pnl is owned by MT5 (elite_account.dayProfit) — don't set it here.
         d["aum"]                 = round(aum, 2)
@@ -815,16 +843,17 @@ def _push_data(kind: str, data, trader: str = None):
         # all-time / profit-share / followers come from Bitget (kind="elite_trader").
         row = data if isinstance(data, dict) else {}
         d = dict(_elite["data"] or {})
-        bal = _fv("balance", "equity", src=row)
-        if bal:
+        bal = _fv("balance", "equity", src=row, default=None)
+        if bal is not None:
             d["balance"] = round(bal, 2)
-        eq = _fv("equity", "netValue", src=row)
-        if eq:
+        eq = _fv("equity", "netValue", src=row, default=None)
+        if eq is not None:
             d["equity"] = round(eq, 2)
         # open_pnl normally derived from elite_positions; keep MT5 float as fallback.
-        flt = _fv("floatProfit", "profit", "unrealizedPnl", "openPnl", src=row)
-        if not d.get("open_pnl") and flt:
-            d["open_pnl"] = round(flt, 2)
+        flt = _fv("floatProfit", "profit", "unrealizedPnl", "openPnl", src=row, default=None)
+        if flt is not None:
+            d["account_open_pnl"] = round(flt, 4)
+            _elite["account_ts"] = time.monotonic_ns()
         # Today's realized PnL straight from MT5 (/history/today) — authoritative,
         # avoids the deal-timestamp timezone issue in the trade-derived calc.
         if "dayProfit" in row:
@@ -846,6 +875,7 @@ def _push_data(kind: str, data, trader: str = None):
         # Open positions for the elite (lead) portfolio — same shape as the
         # global tracePosition payload, parsed by _parse_positions.
         _elite["positions_raw"] = data
+        _elite["positions_ts"] = time.monotonic_ns()
         _elite["fetched_at"] = datetime.now(BKK).isoformat()
         _rebuild_elite()
         pos = _elite.get("positions") or []
@@ -955,7 +985,11 @@ def _rebuild_trader_summary(name: str) -> dict:
     # Open PnL + count: prefer this trader's own positions (per-trader positions_raw);
     # fall back to the copy_details summary fields when no positions pushed yet.
     positions = _parse_positions(tc.get("positions_raw"))
-    if positions:
+    if ("open_pnl" in ts and
+            tc.get("open_summary_ts", 0) > tc.get("positions_ts", 0)):
+        open_pnl = ts["open_pnl"]
+        open_pos_count = ts.get("open_position_count", len(positions))
+    elif tc.get("positions_raw") is not None:
         open_pnl = round(sum(p["unrealized_pnl"] for p in positions), 4)
         open_pos_count = len(positions)
     else:
@@ -965,9 +999,9 @@ def _rebuild_trader_summary(name: str) -> dict:
             open_pos_count = 1  # we know there's at least one
 
     # For futures traders Bitget doesn't expose a direct balance field,
-    # so compute it as: investment + all-time PnL + open (unrealized) PnL.
+    # so compute cash balance from investment + realized PnL. Equity adds open PnL.
     if _trader_type(name) == "futures" and scraped_balance == 0.0:
-        balance = round(investment + all_time_pnl + open_pnl, 2)
+        balance = round(investment + all_time_pnl, 2)
     else:
         balance = scraped_balance
 

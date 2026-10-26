@@ -1356,9 +1356,12 @@
     const pos = livePositions();
     if (!pos.some(p => p.live)) return;
     renderPositions(pos);
-    const liveTotal = pos.reduce((s, p) => s + (p.unrealized_pnl || 0), 0);
+    const positionTotal = pos.reduce((s, p) => s + (p.unrealized_pnl || 0), 0);
     const scrapedTotal = _lastPositions.reduce((s, p) => s + (p.unrealized_pnl || 0), 0);
-    _liveOpenDelta = liveTotal - scrapedTotal;
+    _liveOpenDelta = positionTotal - scrapedTotal;
+    // The summary can include accounts with only balance/equity data. Adjust
+    // its total by the priced positions' change; keep those other accounts in it.
+    const liveTotal = (_lastMt5?.open_positions_pnl ?? scrapedTotal) + _liveOpenDelta;
 
     const opEl = document.getElementById('open-pnl');
     opEl.textContent = fmt(liveTotal);
@@ -1399,7 +1402,8 @@
   function renderBalance() {
     const mt5 = _lastMt5;
     if (!mt5) return 0;
-    const displayBalance = (mt5.total_balance || 0) + _earnTotal + _eliteTotal + _liveOpenDelta;
+    const displayBalance = (mt5.total_balance || 0) + _earnTotal + _eliteTotal +
+      (mt5.open_positions_pnl || 0) + _liveOpenDelta;
     document.getElementById('total-balance').textContent = fmtBal(displayBalance);
     document.getElementById('total-investment').textContent = fmtBal(mt5.total_investment);
 
@@ -1490,7 +1494,7 @@
 
       const bkkNow = new Date(Date.now() + 7 * 3600000);
       const bkkToday = bkkNow.toISOString().slice(0, 10);
-      const todayTrades = trades.filter(t => t.time && t.time.startsWith(bkkToday)).length;
+      const todayTrades = mt5.trades_today ?? trades.filter(t => t.time && t.time.startsWith(bkkToday)).length;
       document.getElementById('daily-sub').textContent =
         todayTrades + ' trade' + (todayTrades !== 1 ? 's' : '') + ' today';
 
