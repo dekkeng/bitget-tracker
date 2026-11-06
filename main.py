@@ -35,6 +35,7 @@ COOKIES_FILE     = Path(os.environ.get("COOKIES_PATH", "cookies.json"))
 TRADERS_FILE     = Path(os.environ.get("TRADERS_PATH", "traders.json"))
 CREDENTIALS_FILE = Path(os.environ.get("CREDENTIALS_PATH", "credentials.json"))
 HISTORY_FILE     = Path(os.environ.get("HISTORY_PATH", "history.json"))
+COPY_CURRENT_ONLY = os.environ.get("COPY_CURRENT_ONLY", "").lower() in ("1", "true", "yes")
 
 
 def _safe_write_text(path: Path, text: str) -> bool:
@@ -84,8 +85,8 @@ def _load_traders_list() -> list[dict]:
     if TRADERS_FILE.exists():
         try:
             data = json.loads(TRADERS_FILE.read_text())
-            entries = data.get("traders", [])
-            if entries:
+            entries = data.get("traders") if isinstance(data, dict) else None
+            if isinstance(entries, list):
                 return entries
         except (json.JSONDecodeError, OSError):
             pass
@@ -166,6 +167,11 @@ def _save_settings(s: dict) -> None:
 _settings = _load_settings()
 if "traders" not in _settings:
     _settings["traders"] = {}
+if COPY_CURRENT_ONLY:
+    _settings["cancelled_copy_pnl"] = 0.0
+    _settings["cancelled_copy_count"] = 0
+    _settings["cancelled_trader_names"] = []
+    _save_settings(_settings)
 
 
 def _load_history() -> dict[str, list]:
@@ -557,13 +563,16 @@ def _push_data(kind: str, data, trader: str = None):
     _mt5["last_push_ts"] = time.time()   # liveness: any push keeps the dot green
     if kind == "heartbeat":
         return                            # liveness ping only — no data, no rebuild
-    if trader:
+    if COPY_CURRENT_ONLY and kind == "cancelled_copies":
+        return
+    if kind in ("positions", "history", "copy_details", "fund_flow", "trader_config"):
+        trader = trader or _DEFAULT_TRADER
+        # In current-only mode, delayed pushes cannot restore a removed trader.
+        if not trader or (COPY_CURRENT_ONLY and trader not in _trader_names()):
+            return
         _ensure_trader(trader, data)
-    if trader is None:
-        trader = _DEFAULT_TRADER
-
-    tc = _tc(trader)
-    ts = _ts(trader)
+        tc = _tc(trader)
+        ts = _ts(trader)
 
     if kind == "positions":
         # Per-trader open positions (alert pushes one payload per trader).
@@ -710,18 +719,14 @@ def _push_data(kind: str, data, trader: str = None):
     elif kind == "cancelled_copies":
         # Account-level: net profit from all copy portfolios the user has stopped.
         # Stored globally (not per-trader) since these copies no longer exist as traders.
-        rows = data if isinstance(data, list) else []
-        if not rows:
+        if not isinstance(data, list) or not all(isinstance(row, dict) for row in data):
             return
-        r0 = rows[0] if isinstance(rows[0], dict) else {}
+        rows = data
         # Reject if rows look like active portfolio data (live trading fields present).
         # Active portfolios have marginCall/credit/connecting; cancelled summaries don't.
-        if any(k in r0 for k in ("marginCall", "credit", "connecting")):
-            logger.warning("Cancelled copies: rejected active portfolio data (%d rows) — clearing stale value",
+        if any(k in row for row in rows for k in ("marginCall", "credit", "connecting")):
+            logger.warning("Cancelled copies: rejected active portfolio data (%d rows)",
                            len(rows))
-            _settings.pop("cancelled_copy_pnl", None)
-            _settings.pop("cancelled_copy_count", None)
-            _save_settings(_settings)
             return
         total = 0.0
         for r in rows:
@@ -1102,8 +1107,8 @@ def _rebuild_summary() -> None:
     if _investment.get("data") and _investment["data"].get("net", 0) > 0:
         total_investment = _investment["data"]["net"]
 
-    cancelled_copy_pnl = round(_settings.get("cancelled_copy_pnl", 0.0), 2)
-    cancelled_copy_count = _settings.get("cancelled_copy_count", 0)
+    cancelled_copy_pnl = 0.0 if COPY_CURRENT_ONLY else round(_settings.get("cancelled_copy_pnl", 0.0), 2)
+    cancelled_copy_count = 0 if COPY_CURRENT_ONLY else _settings.get("cancelled_copy_count", 0)
     # Prefer the scraped elite all-time PnL; fall back to the manual settings value.
     elite_all_time_pnl = round(elite_d.get("all_time_pnl") or
                                _settings.get("elite_all_time_pnl", 0.0), 2)
@@ -1717,7 +1722,7 @@ async def add_trader(request: Request):
 
 @app.delete("/api/traders/{name}")
 async def remove_trader(name: str):
-    global _traders_list
+    global _traders_list, _DEFAULT_TRADER
     before = len(_traders_list)
     _traders_list = [t for t in _traders_list if t["name"] != name]
     if len(_traders_list) == before:
@@ -1725,6 +1730,8 @@ async def remove_trader(name: str):
     # Clean up in-memory cache for removed trader
     _traders_cache.pop(name, None)
     _settings.get("traders", {}).pop(name, None)
+    if _DEFAULT_TRADER == name:
+        _DEFAULT_TRADER = _traders_list[0]["name"] if _traders_list else ""
     _save_traders_list(_traders_list)
     _save_settings(_settings)
     logger.info("Trader removed: name=%s", name)

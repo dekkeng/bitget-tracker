@@ -1,4 +1,6 @@
 import importlib.util
+import asyncio
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -25,6 +27,29 @@ class PnlSyncTests(unittest.TestCase):
             app = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(app)
         return app, root / "settings.json"
+
+    def test_confirmed_empty_cancelled_snapshot_clears_persisted_totals_and_names(self):
+        app, settings = self.load_app()
+        app._push_data("cancelled_copies", [{"name": "ManuGoldPrime", "netProfit": -120}])
+        app._push_data("cancelled_copies", {"error": "timeout"})
+        self.assertEqual(app._mt5["summary"]["cancelled_copy_pnl"], -120)
+        app._push_data("cancelled_copies", [])
+        saved = json.loads(settings.read_text())
+        self.assertEqual(saved["cancelled_trader_names"], [])
+        self.assertEqual(saved["cancelled_copy_count"], 0)
+        self.assertEqual(app._mt5["summary"]["cancelled_copy_pnl"], 0)
+
+    def test_removing_the_last_trader_survives_reload_and_global_pushes(self):
+        app, _ = self.load_app()
+        app._push_data("positions", [{"symbol": "XAUUSD", "profit": 7}], "ManuGoldPrime")
+        result = asyncio.run(app.remove_trader("ManuGoldPrime"))
+        self.assertTrue(result["ok"])
+        self.assertEqual(app._load_traders_list(), [])
+        app._push_data("positions", [])  # unscoped legacy push
+        app._push_data("elite_account", {"balance": 100, "dayProfit": 3})
+        self.assertEqual(app._trader_names(), [])
+        self.assertEqual(app._traders_cache, {})
+        self.assertEqual(app._settings["traders"], {})
 
     def test_mt5_float_survives_rebuild_and_resets_on_explicit_zero(self):
         app, _ = self.load_app()

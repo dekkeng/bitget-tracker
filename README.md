@@ -221,6 +221,12 @@ Verify at `/api/credentials/status` (`configured: true`) and `/api/earn` (`total
 
 ## Persistence
 
+To count only the copy traders currently registered in the dashboard, set
+`COPY_CURRENT_ONLY=true`. In this mode, pushes for removed traders cannot
+auto-register them again, and stopped-copy PnL is excluded. Add a newly followed
+trader through the dashboard before its data is pushed. Set `TRADERS` to the
+current list as the startup fallback when there is no persistent volume.
+
 The app keeps runtime data in JSON files. Their paths are configurable via env vars so
 you can point them at a mounted volume:
 
