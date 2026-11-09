@@ -221,11 +221,15 @@ Verify at `/api/credentials/status` (`configured: true`) and `/api/earn` (`total
 
 ## Persistence
 
-To count only the copy traders currently registered in the dashboard, set
-`COPY_CURRENT_ONLY=true`. In this mode, pushes for removed traders cannot
-auto-register them again, and stopped-copy PnL is excluded. Add a newly followed
-trader through the dashboard before its data is pushed. Set `TRADERS` to the
-current list as the startup fallback when there is no persistent volume.
+When Bitget Alert supplies the Bitget browser session, set `DISABLE_POLLER=true`
+and `COPY_CURRENT_ONLY=true`. Alert sends the authenticated CFD Copier Center
+list and its balances. Tracker replaces the active list on each successful
+snapshot, including an empty list when you stop copying everyone. Stopped-copy
+PnL stays outside the totals. Elite and Earn sync separately.
+
+Leave `TRADERS` unset for this setup. The first snapshot switches the dashboard
+to Bitget-managed mode. Tracker restores the last accepted list from
+`TRADERS_PATH` on restart and keeps it when the Bitget read fails.
 
 The app keeps runtime data in JSON files. Their paths are configurable via env vars so
 you can point them at a mounted volume:
@@ -234,7 +238,7 @@ you can point them at a mounted volume:
 |---------|---------|---------------|
 | `SETTINGS_PATH` | `settings.json` | manual overrides (balance, investment, elite/stopped P&L) |
 | `COOKIES_PATH` | `cookies.json` | the session cookie (incl. the auto-refreshed one) |
-| `TRADERS_PATH` | `traders.json` | traders added via the dashboard |
+| `TRADERS_PATH` | `traders.json` | active Bitget roster or traders added via the dashboard |
 | `HISTORY_PATH` | `history.json` | accumulated closed-trade history (built up over time) |
 | `CREDENTIALS_PATH` | `credentials.json` | API keys saved via the dashboard |
 

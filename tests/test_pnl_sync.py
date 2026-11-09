@@ -44,7 +44,7 @@ class PnlSyncTests(unittest.TestCase):
         app._push_data("positions", [{"symbol": "XAUUSD", "profit": 7}], "ManuGoldPrime")
         result = asyncio.run(app.remove_trader("ManuGoldPrime"))
         self.assertTrue(result["ok"])
-        self.assertEqual(app._load_traders_list(), [])
+        self.assertEqual(app._load_traders_list(), ([], False))
         app._push_data("positions", [])  # unscoped legacy push
         app._push_data("elite_account", {"balance": 100, "dayProfit": 3})
         self.assertEqual(app._trader_names(), [])

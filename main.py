@@ -72,7 +72,7 @@ def _parse_traders_env() -> list[dict]:
                     "id":   parts[1].strip(),
                     "type": parts[2].strip() if len(parts) >= 3 else "cfd",
                 })
-    else:
+    elif not COPY_CURRENT_ONLY:
         result.append({
             "name": os.environ.get("TRADER_NAME", "TraderName"),
             "id":   os.environ.get("PORTFOLIO_ID", "YOUR_PORTFOLIO_ID"),
@@ -81,24 +81,32 @@ def _parse_traders_env() -> list[dict]:
     return result
 
 
-def _load_traders_list() -> list[dict]:
+def _load_traders_list() -> tuple[list[dict], bool]:
     if TRADERS_FILE.exists():
         try:
             data = json.loads(TRADERS_FILE.read_text())
             entries = data.get("traders") if isinstance(data, dict) else None
             if isinstance(entries, list):
-                return entries
+                return entries, COPY_CURRENT_ONLY and data.get("source") == "bitget"
         except (json.JSONDecodeError, OSError):
             pass
-    return _parse_traders_env()
+    return _parse_traders_env(), False
 
 
-def _save_traders_list(traders: list[dict]) -> None:
-    _safe_write_text(TRADERS_FILE, json.dumps({"traders": traders}))
+def _save_traders_list(traders: list[dict], source: str = "manual") -> bool:
+    temporary = TRADERS_FILE.with_name(TRADERS_FILE.name + ".tmp")
+    if not _safe_write_text(temporary, json.dumps({"traders": traders, "source": source})):
+        return False
+    try:
+        temporary.replace(TRADERS_FILE)
+        return True
+    except OSError as e:
+        logger.warning("Could not replace %s: %s", TRADERS_FILE, e)
+        return False
 
 
 # Module-level mutable list — the single source of truth for main.py
-_traders_list: list[dict] = _load_traders_list()
+_traders_list, _bitget_managed_roster = _load_traders_list()
 
 
 def _trader_names() -> list[str]:
@@ -115,6 +123,10 @@ def _trader_type(name: str) -> str:
         if t["name"] == name:
             return t.get("type", "cfd")
     return "cfd"
+
+
+def _trader_history_key(name: str) -> str:
+    return next((t.get("_history_key", name) for t in _traders_list if t["name"] == name), name)
 
 _DEFAULT_TRADER = _traders_list[0]["name"] if _traders_list else "DKTrading"
 
@@ -206,7 +218,7 @@ _traders_cache: dict[str, dict] = {}
 
 def _tc(name: str) -> dict:
     if name not in _traders_cache:
-        persisted = _load_history().get(name, [])
+        persisted = _load_history().get(_trader_history_key(name), [])
         history_raw = {"code": "200", "data": {"rows": persisted}} if persisted else None
         _traders_cache[name] = {
             "positions_raw": None,
@@ -558,7 +570,56 @@ def _rebuild_elite() -> None:
 
 # ── Push handler ──────────────────────────────────────────────────────────────
 
-def _push_data(kind: str, data, trader: str = None):
+def _apply_active_copy_portfolios(data) -> bool:
+    global _traders_list, _DEFAULT_TRADER, _bitget_managed_roster
+    rows = data.get("portfolios") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return False
+    previous = {str(t["id"]): t for t in _traders_list if t.get("type", "cfd") == "cfd"}
+    portfolios = []
+    names, ids = set(), set()
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        name, pid, details = row.get("name"), row.get("id"), row.get("details")
+        if (not isinstance(name, str) or not name.strip() or name in names or
+                not isinstance(pid, str) or not pid.isascii() or not pid.isdecimal() or pid in ids or
+                not isinstance(details, dict) or str(details.get("portfolioId")) != pid):
+            return False
+        names.add(name)
+        ids.add(pid)
+        old = previous.get(pid)
+        started = details.get("startTime") or details.get("followStartTime") or details.get("createTime")
+        old_start = old.get("_copy_started") if old else None
+        same_copy = old and not (old_start and started and old_start != str(started))
+        history_key = (old.get("_history_key", old["name"]) if same_copy
+                       else f"__copy__:{pid}:{time.time_ns()}")
+        portfolios.append({"name": name, "id": pid, "type": "cfd",
+                           "_history_key": history_key, "_copy_started": str(started) if started else old_start})
+
+    if not _bitget_managed_roster or portfolios != _traders_list:
+        if not _save_traders_list(portfolios, source="bitget"):
+            return False
+        retained = {(t["id"], t["name"], t.get("_history_key", t["name"])) for t in _traders_list}
+        retained_names = {t["name"] for t in portfolios if (t["id"], t["name"], t["_history_key"]) in retained}
+        for name in set(_trader_names()) | names:
+            if name not in retained_names:
+                _traders_cache.pop(name, None)
+                _settings["traders"].pop(name, None)
+        _traders_list = portfolios
+        _DEFAULT_TRADER = portfolios[0]["name"] if portfolios else ""
+        _bitget_managed_roster = True
+        logger.info("Synced active Bitget copy portfolios: %s", ", ".join(_trader_names()) or "(none)")
+
+    for row in rows:
+        _ts(row["name"]).pop("count_in_total", None)
+        _push_data("copy_details", row["details"], row["name"], rebuild=False)
+    _save_settings(_settings)
+    _rebuild_summary()
+    return True
+
+
+def _push_data(kind: str, data, trader: str = None, *, rebuild: bool = True):
     global _settings
     _mt5["last_push_ts"] = time.time()   # liveness: any push keeps the dot green
     if kind == "heartbeat":
@@ -591,7 +652,7 @@ def _push_data(kind: str, data, trader: str = None):
             existing_rows = _extract_history_rows(tc.get("history_raw"))
             merged = _merge_history_rows(existing_rows, new_rows)
             tc["history_raw"] = {"code": "200", "data": {"rows": merged}}
-            _save_history(trader, merged)
+            _save_history(_trader_history_key(trader), merged)
             logger.info("History[%s]: merged %d new + kept old → %d total rows",
                         trader, len(new_rows), len(merged))
         elif tc.get("history_raw") is None:
@@ -714,7 +775,7 @@ def _push_data(kind: str, data, trader: str = None):
             st = _fv("startTime", "followStartTime", "createTime", src=data, default=0.0)
             if st > 0:
                 ts["start_time_ms"] = int(st if st > 10_000_000_000 else st * 1000)
-            if changed:
+            if changed and rebuild:
                 _save_settings(_settings)
     elif kind == "cancelled_copies":
         # Account-level: net profit from all copy portfolios the user has stopped.
@@ -942,6 +1003,8 @@ def _push_data(kind: str, data, trader: str = None):
         _mt5["balance_sniffs"].append(data)
         _mt5["balance_sniffs"] = _mt5["balance_sniffs"][-20:]
 
+    if not rebuild:
+        return
     try:
         _rebuild_summary()
     except Exception as e:
@@ -966,6 +1029,8 @@ def _rebuild_trader_summary(name: str) -> dict:
         ts["_type"] = current_type
 
     trades = _parse_trades(tc["history_raw"])
+    if _bitget_managed_roster and ts.get("start_time_ms"):
+        trades = [t for t in trades if t["close_time_ms"] >= ts["start_time_ms"]]
     history = _parse_history_chart(trades)
 
     today_start_ms, today_end_ms = _bkk_today_range_ms()
@@ -975,12 +1040,14 @@ def _rebuild_trader_summary(name: str) -> dict:
     )
     trades_pnl = sum(t["pnl"] for t in trades)
     scraped_pnl = ts.get("realized_pnl", 0.0)
-    all_time_pnl = scraped_pnl if scraped_pnl != 0.0 else trades_pnl
+    all_time_pnl = scraped_pnl if (
+        scraped_pnl != 0.0 or (_bitget_managed_roster and "realized_pnl" in ts)
+    ) else trades_pnl
 
     # Profit share paid to the trader: prefer the portfolio-level scrape,
     # fall back to summing per-trade share amounts from history
     profit_share = ts.get("profit_share", 0.0)
-    if not profit_share:
+    if not profit_share and not (_bitget_managed_roster and "profit_share" in ts):
         profit_share = round(sum(t.get("profit_share", 0.0) for t in trades), 2)
     net_all_time_pnl = round(all_time_pnl - profit_share, 4)
 
@@ -1245,7 +1312,19 @@ app.add_middleware(
 @app.post("/api/push/mt5")
 async def push_mt5(request: Request):
     body = await request.json()
-    _push_data(body.get("kind"), body.get("data"), body.get("trader"))
+    kind, data, trader = body.get("kind"), body.get("data"), body.get("trader")
+    if kind == "active_copy_portfolios":
+        if not COPY_CURRENT_ONLY or not _apply_active_copy_portfolios(data):
+            return JSONResponse({"ok": False, "boot": BOOT_ID}, status_code=409)
+        return {"ok": True, "boot": BOOT_ID, "activeCopyRoster": True}
+    if _bitget_managed_roster:
+        if kind in ("trader_config", "copy_details", "fund_flow"):
+            return {"ok": True, "boot": BOOT_ID}
+        if kind in ("positions", "history") and (
+            not trader or not _trader_id(trader) or body.get("portfolioId") != _trader_id(trader)
+        ):
+            return JSONResponse({"ok": False, "boot": BOOT_ID}, status_code=409)
+    _push_data(kind, data, trader)
     return {"ok": True, "boot": BOOT_ID}
 
 
@@ -1696,12 +1775,17 @@ async def get_esp32_trader(name: str):
 
 @app.get("/api/traders")
 async def list_traders():
-    return _traders_list
+    return JSONResponse(
+        [{k: t[k] for k in ("name", "id", "type") if k in t} for t in _traders_list],
+        headers={"X-Trader-Roster": "bitget" if _bitget_managed_roster else "manual"},
+    )
 
 
 @app.post("/api/traders")
 async def add_trader(request: Request):
     global _traders_list, _DEFAULT_TRADER
+    if _bitget_managed_roster:
+        return {"ok": False, "error": "Manage active copy portfolios in Bitget Copier Center"}
     body = await request.json()
     name  = str(body.get("name", "")).strip()
     pid   = str(body.get("id", "")).strip()
@@ -1723,6 +1807,8 @@ async def add_trader(request: Request):
 @app.delete("/api/traders/{name}")
 async def remove_trader(name: str):
     global _traders_list, _DEFAULT_TRADER
+    if _bitget_managed_roster:
+        return {"ok": False, "error": "Manage active copy portfolios in Bitget Copier Center"}
     before = len(_traders_list)
     _traders_list = [t for t in _traders_list if t["name"] != name]
     if len(_traders_list) == before:

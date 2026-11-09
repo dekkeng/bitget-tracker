@@ -851,6 +851,8 @@
     <div class="modal-handle"></div>
     <div class="modal-title">Manage Traders</div>
     <div id="traders-modal-list" style="margin-bottom:14px"></div>
+    <div id="bitget-roster-note" hidden>Synced from Currently copying in the Bitget CFD Copier Center.</div>
+    <div id="trader-add-form">
     <hr style="border:none;border-top:1px solid var(--border);margin:0 0 14px">
     <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);margin-bottom:12px">Add Trader</div>
     <div class="modal-field">
@@ -869,6 +871,7 @@
       </select>
     </div>
     <div id="trader-add-status" style="font-size:12px;margin-bottom:10px;display:none"></div>
+    </div>
     <div class="modal-actions">
       <button class="btn-cancel" onclick="document.getElementById('traders-modal').classList.remove('active')">Close</button>
       <button class="btn-save" id="trader-add-btn">Add</button>
@@ -1881,10 +1884,15 @@
   }
 
   async function refreshTradersModalList() {
-    const traders = await fetch('/api/traders').then(r => r.json());
+    const response = await fetch('/api/traders');
+    const traders = await response.json();
+    const synced = response.headers.get('X-Trader-Roster') === 'bitget';
+    document.getElementById('bitget-roster-note').hidden = !synced;
+    document.getElementById('trader-add-form').hidden = synced;
+    document.getElementById('trader-add-btn').hidden = synced;
     const el = document.getElementById('traders-modal-list');
     if (!traders || !traders.length) {
-      el.innerHTML = '<div class="empty">No traders configured</div>';
+      el.innerHTML = synced ? '<div class="empty">No active copy portfolios</div>' : '<div class="empty">No traders configured</div>';
       return;
     }
     el.innerHTML = traders.map(t => {
@@ -1898,7 +1906,7 @@
         </div>
         <div style="display:flex;gap:6px;flex-shrink:0">
           <button class="btn-reset-data" data-act="reset" data-name="${esc(t.name)}" title="Clear cached balance/investment data">Reset data</button>
-          <button class="btn-remove" data-act="remove" data-name="${esc(t.name)}">Remove</button>
+          ${synced ? '' : `<button class="btn-remove" data-act="remove" data-name="${esc(t.name)}">Remove</button>`}
         </div>
       </div>`;
     }).join('');
